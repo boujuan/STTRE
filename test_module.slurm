@@ -10,19 +10,20 @@
 #SBATCH --mem=4G
 #SBATCH --gres=gpu:1
 
-# Print basic info
-echo "Starting job"
-hostname
-date
+# Enable verbose mode
+set -x
 
-# Try loading module
+# Print basic info
+pwd
+ls -la
+
+# Try loading newer CUDA version based on available modules
 echo "Loading CUDA module..."
 module --force purge
-module load CUDA/12.2.0
+module load CUDA/12.4.0
 echo "Module load exit status: $?"
 
 # Print environment
-echo "PATH=$PATH"
-echo "LD_LIBRARY_PATH=$LD_LIBRARY_PATH"
+env | sort
 
 echo "Job complete"
