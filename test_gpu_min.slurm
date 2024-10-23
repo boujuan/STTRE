@@ -1,8 +1,9 @@
 #!/bin/bash
-#SBATCH --job-name=test_module
-#SBATCH --output=test_module_%j.out
-#SBATCH --error=test_module_%j.err
+#SBATCH --job-name=test_gpu
+#SBATCH --output=test_gpu_%j.out
+#SBATCH --error=test_gpu_%j.err
 #SBATCH --partition=all_gpu.p
+#SBATCH --nodelist=mpcg004
 #SBATCH --time=00:05:00
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
@@ -10,19 +11,19 @@
 #SBATCH --mem=4G
 #SBATCH --gres=gpu:1
 
+# Enable verbose mode
+set -x
+
 # Print basic info
-echo "Starting job"
 hostname
 date
+pwd
 
-# Try loading module
-echo "Loading CUDA module..."
+# Try loading newer CUDA version
 module --force purge
-module load CUDA/12.2.0
-echo "Module load exit status: $?"
+module load CUDA/12.4.0
 
-# Print environment
-echo "PATH=$PATH"
-echo "LD_LIBRARY_PATH=$LD_LIBRARY_PATH"
+# Check GPU visibility
+nvidia-smi
 
 echo "Job complete"
