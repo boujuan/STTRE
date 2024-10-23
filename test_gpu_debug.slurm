@@ -10,6 +10,14 @@
 #SBATCH --mem=4G
 #SBATCH --gres=gpu:1
 
+# Enable error tracing
+set -x
+
+# Initialize shell
+if [ -f /etc/profile ]; then
+    source /etc/profile
+fi
+
 # Print basic info
 hostname
 date
@@ -19,13 +27,16 @@ pwd
 module purge
 module load CUDA/12.4.0
 
-# Activate conda environment
-source ~/.bashrc
+# Initialize conda
+eval "$(conda shell.bash hook)"
 mamba activate wind_forecasting_cuda
 
 # Print versions
+which python
 python --version
+which nvcc
 nvcc --version
+which nvidia-smi
 nvidia-smi
 
 # Try a simple Python CUDA test

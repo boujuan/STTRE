@@ -41,7 +41,7 @@ done
 echo "Loading modules..."
 module purge || { echo "Failed to purge modules"; exit 1; }
 module load Mamba/24.3.0-0 || { echo "Failed to load Mamba module"; exit 1; }
-module load CUDA/12.2.0 || { echo "Failed to load CUDA module"; exit 1; }
+module load CUDA/12.4.0 || { echo "Failed to load CUDA module"; exit 1; }
 module list
 
 # Activate conda environment

@@ -35,7 +35,7 @@ echo "GPU_DEVICE_ORDINAL: $GPU_DEVICE_ORDINAL"
 # Load modules with error checking
 echo "=== Loading Modules ==="
 module purge
-module load CUDA/12.2.0 || echo "Failed to load CUDA module"
+module load CUDA/12.4.0 || echo "Failed to load CUDA module"
 module list
 
 # Print updated environment
