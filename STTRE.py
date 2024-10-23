@@ -535,11 +535,11 @@ def train_test(embed_size, heads, num_layers, dropout, forward_expansion, lr, ba
                 inputs, labels = inputs.to(device), labels.to(device)
                 optimizer.zero_grad()
                 
-                # Remove autocast context
+                # Forward pass
                 outputs = model(inputs, dropout)
                 loss = loss_fn(outputs, labels)
                 
-                # Normal backward pass
+                # Backward pass
                 loss.backward()
                 optimizer.step()
                 
@@ -577,13 +577,6 @@ def train_test(embed_size, heads, num_layers, dropout, forward_expansion, lr, ba
             if early_stopping.early_stop:
                 print("Early stopping triggered")
                 break
-            if epoch_val_mse < best_val_loss:
-                best_val_loss = epoch_val_mse
-                patience_counter = 0
-                # Save best model
-                torch.save(model.state_dict(), f'best_model_{dataset}.pth')
-            else:
-                patience_counter += 1
 
             # Store metrics
             history['train']['MSE'].append(epoch_train_mse.item())
