@@ -19,17 +19,16 @@
 #SBATCH --mem=32G
 #SBATCH --gres=gpu:1
 
-# Exit on error
+# Exit on error and print commands
 set -e
-
-# Print commands and their arguments as they are executed
 set -x
 
 # Create logs directory first (since output/error files depend on it)
 mkdir -p logs || { echo "Failed to create logs directory"; exit 1; }
 
-# Echo start time
+# Echo start time and node info
 echo "Job started at: $(date)"
+echo "Running on node: $(hostname) at $(date) with SLURM_JOB_ID: ${SLURM_JOB_ID}"
 
 # Create other necessary directories
 for dir in DATA plots models; do
@@ -45,11 +44,12 @@ module list
 
 # Activate conda environment
 echo "Activating conda environment..."
-source activate wind_forecasting_cuda || { echo "Failed to activate conda environment"; exit 1; }
+mamba activate wind_forecasting_cuda || { echo "Failed to activate conda environment"; exit 1; }
 
-# Print Python and CUDA info
-echo "Checking Python and CUDA setup..."
-python --version || { echo "Python not found"; exit 1; }
+# Verify environment
+which python
+python --version
+echo "CONDA_PREFIX: $CONDA_PREFIX"
 
 # Check NVIDIA GPU
 echo "Checking GPU..."
@@ -62,9 +62,7 @@ fi
 # Print PyTorch info
 echo "Checking PyTorch setup..."
 python -c "
-import sys
 import torch
-print('Python version:', sys.version)
 print('PyTorch version:', torch.__version__)
 print('CUDA available:', torch.cuda.is_available())
 print('CUDA version:', torch.version.cuda)
@@ -96,5 +94,4 @@ python -O STTRE.py || { echo "Failed to run main script"; exit 1; }
 echo "Compressing results..."
 tar -czf results_${SLURM_JOB_ID}.tar.gz plots/ models/ logs/ || { echo "Failed to compress results"; exit 1; }
 
-# Echo end time
 echo "Job completed at: $(date)"
