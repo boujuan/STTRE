@@ -668,9 +668,10 @@ if __name__ == "__main__":
     # List of experiments to run
     experiments = [
         {
-            'embed_size': 32,  # changed from 'd'
-            'heads': 4,        # changed from 'h'
+            'embed_size': 32,
+            'heads': 4,
             'num_layers': 3,
+            'dropout': 0.2,
             'forward_expansion': 1,
             'dropout': 0.2,
             'lr': 0.0001,
@@ -698,13 +699,25 @@ if __name__ == "__main__":
         print(f"\nStarting experiment with dataset: {exp['dataset']}")
         try:
             if torch.cuda.is_available():
-                torch.cuda.empty_cache()  # Clear GPU memory before each experiment
-            history = train_test(**exp)
+                torch.cuda.empty_cache()
+            history = train_test(
+                embed_size=exp['embed_size'],
+                heads=exp['heads'],
+                num_layers=exp['num_layers'],
+                dropout=exp['dropout'],
+                forward_expansion=exp['forward_expansion'],
+                lr=exp['lr'],
+                batch_size=exp['batch_size'],
+                dir=exp['dir'],
+                dataset=exp['dataset'],
+                NUM_EPOCHS=exp['NUM_EPOCHS'],
+                TEST_SPLIT=exp['TEST_SPLIT']
+            )
             print(f"Completed experiment with dataset: {exp['dataset']}")
         except Exception as e:
             print(f"Error in experiment with dataset {exp['dataset']}: {str(e)}")
             if torch.cuda.is_available():
-                torch.cuda.empty_cache()  # Clear GPU memory after error
+                torch.cuda.empty_cache()
             continue
 
     print("\nAll experiments completed!")
