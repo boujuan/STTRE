@@ -668,15 +668,28 @@ if __name__ == "__main__":
     # List of experiments to run
     experiments = [
         {
-            'd': 32, 'h': 4, 'num_layers': 3, 'forward_expansion': 1,
-            'dropout': 0.2, 'lr': 0.0001, 'batch_size': 256,
-            'NUM_EPOCHS': 100, 'TEST_SPLIT': 0.3,
-            'dir': 'DATA/uber_stock.csv', 'dataset': 'Uber'
+            'embed_size': 32,  # changed from 'd'
+            'heads': 4,        # changed from 'h'
+            'num_layers': 3,
+            'forward_expansion': 1,
+            'dropout': 0.2,
+            'lr': 0.0001,
+            'batch_size': 256,
+            'NUM_EPOCHS': 100,
+            'TEST_SPLIT': 0.3,
+            'dir': 'DATA/uber_stock.csv',
+            'dataset': 'Uber'
         },
         # {
-        #     'd': 8, 'h': 4, 'num_layers': 3, 'forward_expansion': 1,
-        #     'dropout': 0.1, 'lr': 0.0001, 'batch_size': 32,
-        #     'dir': '', 'dataset': 'AppliancesEnergy1'
+        #     'embed_size': 8,
+        #     'heads': 4,
+        #     'num_layers': 3,
+        #     'forward_expansion': 1,
+        #     'dropout': 0.1,
+        #     'lr': 0.0001,
+        #     'batch_size': 32,
+        #     'dir': '',
+        #     'dataset': 'AppliancesEnergy1'
         # },
     ]
 
