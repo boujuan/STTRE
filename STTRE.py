@@ -13,6 +13,20 @@ import matplotlib
 matplotlib.use('Agg')  # Set non-interactive backend for HPC
 import matplotlib.pyplot as plt
 # import yfinance as yf
+from pathlib import Path
+
+# Create a directory in the user's home directory
+HOME = str(Path.home())
+SAVE_DIR = os.path.join(HOME, 'STTRE_outputs')
+MODEL_DIR = os.path.join(SAVE_DIR, 'models')
+PLOT_DIR = os.path.join(SAVE_DIR, 'plots')
+DATA_DIR = os.path.join(SAVE_DIR, 'data')
+
+# Create directories with proper permissions
+os.makedirs(SAVE_DIR, exist_ok=True)
+os.makedirs(MODEL_DIR, exist_ok=True)
+os.makedirs(PLOT_DIR, exist_ok=True)
+os.makedirs(DATA_DIR, exist_ok=True)
 
 # CUDA setup
 USE_CUDA = True
@@ -447,7 +461,9 @@ class EarlyStopping:
     def save_checkpoint(self, val_loss, model, path):
         if self.verbose:
             print(f'Validation loss decreased ({self.val_loss_min:.6f} --> {val_loss:.6f}). Saving model ...')
-        torch.save(model.state_dict(), path)
+        # Save to the models directory
+        full_path = os.path.join(MODEL_DIR, path)
+        torch.save(model.state_dict(), full_path)
         self.val_loss_min = val_loss
 
 def plot_metrics(train_metrics, val_metrics, metric_names, dataset):
@@ -463,8 +479,7 @@ def plot_metrics(train_metrics, val_metrics, metric_names, dataset):
         axes[i].grid(True)
     
     plt.tight_layout()
-    os.makedirs('plots', exist_ok=True)
-    plt.savefig(f'plots/{dataset}_metrics.png')
+    plt.savefig(os.path.join(PLOT_DIR, f'{dataset}_metrics.png'))
     plt.close()
 
 def train_test(embed_size, heads, num_layers, dropout, forward_expansion, lr, batch_size, dir, dataset, NUM_EPOCHS=100, TEST_SPLIT=0.3):
@@ -599,8 +614,9 @@ def train_test(embed_size, heads, num_layers, dropout, forward_expansion, lr, ba
             if epoch_val_mse < best_val_loss:
                 best_val_loss = epoch_val_mse
                 patience_counter = 0
-                # Save best model
-                torch.save(model.state_dict(), f'best_model_{dataset}.pth')
+                # Save best model to MODEL_DIR
+                model_path = os.path.join(MODEL_DIR, f'best_model_{dataset}.pth')
+                torch.save(model.state_dict(), model_path)
             else:
                 patience_counter += 1
 
@@ -667,7 +683,7 @@ if __name__ == "__main__":
     NUM_EPOCHS = 100       # Number of epochs
     TEST_SPLIT = 0.3       # Train/test split ratio
     
-    dir = 'DATA/uber_stock.csv'
+    dir = os.path.join(DATA_DIR, 'uber_stock.csv')
     dataset = 'Uber'
     
     # Run experiment
