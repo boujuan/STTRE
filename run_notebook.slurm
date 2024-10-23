@@ -19,37 +19,65 @@
 #SBATCH --mem=32G
 #SBATCH --gres=gpu:1
 
-# Create necessary directories
-mkdir -p logs
-mkdir -p DATA
-mkdir -p plots
-mkdir -p models
+# Exit on error
+set -e
 
-# Load required modules
-module purge
-module load Mamba/24.3.0-0
-module load CUDA/12.2.0
+# Print commands and their arguments as they are executed
+set -x
+
+# Create logs directory first (since output/error files depend on it)
+mkdir -p logs || { echo "Failed to create logs directory"; exit 1; }
+
+# Echo start time
+echo "Job started at: $(date)"
+
+# Create other necessary directories
+for dir in DATA plots models; do
+    mkdir -p $dir || { echo "Failed to create $dir directory"; exit 1; }
+done
+
+# Load required modules with error checking
+echo "Loading modules..."
+module purge || { echo "Failed to purge modules"; exit 1; }
+module load Mamba/24.3.0-0 || { echo "Failed to load Mamba module"; exit 1; }
+module load CUDA/12.2.0 || { echo "Failed to load CUDA module"; exit 1; }
+module list
 
 # Activate conda environment
-source activate wind_forecasting_cuda
+echo "Activating conda environment..."
+source activate wind_forecasting_cuda || { echo "Failed to activate conda environment"; exit 1; }
 
-# Print system info
-nvidia-smi
+# Print Python and CUDA info
+echo "Checking Python and CUDA setup..."
+python --version || { echo "Python not found"; exit 1; }
+
+# Check NVIDIA GPU
+echo "Checking GPU..."
+if command -v nvidia-smi &> /dev/null; then
+    nvidia-smi
+else
+    echo "nvidia-smi not found"
+fi
+
+# Print PyTorch info
+echo "Checking PyTorch setup..."
 python -c "
+import sys
 import torch
+print('Python version:', sys.version)
 print('PyTorch version:', torch.__version__)
 print('CUDA available:', torch.cuda.is_available())
 print('CUDA version:', torch.version.cuda)
 print('Number of GPUs:', torch.cuda.device_count())
-print('GPU name:', torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'No GPU')
-"
+if torch.cuda.is_available():
+    print('GPU name:', torch.cuda.get_device_name(0))
+" || { echo "Failed to check PyTorch setup"; exit 1; }
 
-# Download data first
+# Download data
 echo "Downloading Uber stock data..."
 python -c "
 import yfinance as yf
 import os
-
 try:
     uber = yf.download('UBER', start='2019-05-10', end='2024-01-01', progress=False)
     uber.to_csv('DATA/uber_stock.csv')
@@ -57,19 +85,16 @@ try:
     print(f'File size: {os.path.getsize("DATA/uber_stock.csv")/1024:.2f} KB')
 except Exception as e:
     print(f'Error downloading data: {e}')
-    exit(1)
-"
+    sys.exit(1)
+" || { echo "Failed to download data"; exit 1; }
 
-# Run the main script with error handling
+# Run main script
 echo "Starting main training script..."
-python -O STTRE.py
-if [ $? -ne 0 ]; then
-    echo "Error in main script execution"
-    exit 1
-fi
+python -O STTRE.py || { echo "Failed to run main script"; exit 1; }
 
-# Compress results if successful
-# echo "Compressing results..."
-# tar -czf results_${SLURM_JOB_ID}.tar.gz plots/ models/ logs/
+# Compress results
+echo "Compressing results..."
+tar -czf results_${SLURM_JOB_ID}.tar.gz plots/ models/ logs/ || { echo "Failed to compress results"; exit 1; }
 
-echo "Job completed successfully!"
+# Echo end time
+echo "Job completed at: $(date)"
