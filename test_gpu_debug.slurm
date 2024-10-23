@@ -21,7 +21,7 @@ module load CUDA/12.4.0
 
 # Activate conda environment
 source ~/.bashrc
-conda activate wind_forecasting_cuda
+mamba activate wind_forecasting_cuda
 
 # Print versions
 python --version
