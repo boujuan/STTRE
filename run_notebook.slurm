@@ -8,6 +8,8 @@
 # Check error logs
 # tail -f logs/STTRE_GPU_*.err
 
+# srun --partition=all_gpu.p --nodes=1 --ntasks=1 --cpus-per-task=1 --mem=4G --gres=gpu:1 --time=00:10:00 --pty bash -i
+
 #SBATCH --job-name=STTRE_GPU
 #SBATCH --output=logs/STTRE_GPU_%j.out
 #SBATCH --error=logs/STTRE_GPU_%j.err
