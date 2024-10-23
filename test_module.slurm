@@ -2,7 +2,7 @@
 #SBATCH --job-name=test_module
 #SBATCH --output=test_module_%j.out
 #SBATCH --error=test_module_%j.err
-#SBATCH --partition=all_gpu.p
+#SBATCH --partition=cfdg.p
 #SBATCH --time=00:05:00
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
