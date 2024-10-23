@@ -8,7 +8,13 @@
 # Check error logs
 # tail -f logs/STTRE_GPU_*.err
 
-# srun --partition=all_gpu.p --nodes=1 --ntasks=1 --cpus-per-task=1 --mem=4G --gres=gpu:1 --time=00:10:00 --pty bash -i
+# Check partition limits
+# sinfo -o "%20P %5D %6t %8z %10m %N"
+
+# Check current usage
+# squeue -o "%.18i %.9P %.8j %.8u %.2t %.10M %.6D %R"
+
+# srun --partition=all_gpu.p --nodelist=mpcg004 --nodes=1 --ntasks=1 --cpus-per-task=8 --mem=16G --gres=gpu:H100:1 --time=02:00:00 --pty bash -i
 
 #SBATCH --job-name=STTRE_GPU
 #SBATCH --output=logs/STTRE_GPU_%j.out
@@ -40,6 +46,7 @@ done
 # Load required modules with error checking
 echo "Loading modules..."
 module purge || { echo "Failed to purge modules"; exit 1; }
+module load hpc-env/13.1 || { echo "Failed to load hpc-env module"; exit 1; }
 module load Mamba/24.3.0-0 || { echo "Failed to load Mamba module"; exit 1; }
 module load CUDA/12.4.0 || { echo "Failed to load CUDA module"; exit 1; }
 module list
