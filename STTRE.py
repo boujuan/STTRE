@@ -544,8 +544,8 @@ def train_test(embed_size, heads, num_layers, dropout, forward_expansion, lr, ba
                 optimizer.step()
                 
                 # Clear cache periodically
-                if torch.cuda.is_available():
-                    torch.cuda.empty_cache()
+                # if torch.cuda.is_available():
+                #     torch.cuda.empty_cache()
                 
                 # Update metrics
                 train_mse.update(outputs, labels)
@@ -654,60 +654,44 @@ if __name__ == "__main__":
     os.makedirs('models', exist_ok=True)
     os.makedirs('plots', exist_ok=True)
     
-    # List of experiments to run
-    experiments = [
-        {
-            'embed_size': 32,
-            'heads': 4,
-            'num_layers': 3,
-            'dropout': 0.2,
-            'forward_expansion': 1,
-            'dropout': 0.2,
-            'lr': 0.0001,
-            'batch_size': 256,
-            'NUM_EPOCHS': 100,
-            'TEST_SPLIT': 0.3,
-            'dir': 'DATA/uber_stock.csv',
-            'dataset': 'Uber'
-        },
-        # {
-        #     'embed_size': 8,
-        #     'heads': 4,
-        #     'num_layers': 3,
-        #     'forward_expansion': 1,
-        #     'dropout': 0.1,
-        #     'lr': 0.0001,
-        #     'batch_size': 32,
-        #     'dir': '',
-        #     'dataset': 'AppliancesEnergy1'
-        # },
-    ]
-
-    # Run all experiments
-    for exp in experiments:
-        print(f"\nStarting experiment with dataset: {exp['dataset']}")
-        try:
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
-            history = train_test(
-                embed_size=exp['embed_size'],
-                heads=exp['heads'],
-                num_layers=exp['num_layers'],
-                dropout=exp['dropout'],
-                forward_expansion=exp['forward_expansion'],
-                lr=exp['lr'],
-                batch_size=exp['batch_size'],
-                dir=exp['dir'],
-                dataset=exp['dataset'],
-                NUM_EPOCHS=exp['NUM_EPOCHS'],
-                TEST_SPLIT=exp['TEST_SPLIT']
-            )
-            print(f"Completed experiment with dataset: {exp['dataset']}")
-        except Exception as e:
-            print(f"Error in experiment with dataset {exp['dataset']}: {str(e)}")
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
-            continue
+    # Model Architecture Parameters
+    d = 32                    # Embedding dimension
+    h = 4                     # Number of attention heads
+    num_layers = 3           # Number of transformer layers
+    forward_expansion = 1    # Expansion factor for feedforward network
+    
+    # Training Parameters
+    dropout = 0.2           # Dropout rate
+    lr = 0.0001            # Learning rate
+    batch_size = 256       # Batch size
+    NUM_EPOCHS = 100       # Number of epochs
+    TEST_SPLIT = 0.3       # Train/test split ratio
+    
+    dir = 'DATA/uber_stock.csv'
+    dataset = 'Uber'
+    
+    # Run experiment
+    try:
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        history = train_test(
+            embed_size=d,
+            heads=h,
+            num_layers=num_layers,
+            dropout=dropout,
+            forward_expansion=forward_expansion,
+            lr=lr,
+            batch_size=batch_size,
+            dir=dir,
+            dataset=dataset,
+            NUM_EPOCHS=NUM_EPOCHS,
+            TEST_SPLIT=TEST_SPLIT
+        )
+        print(f"Completed experiment with dataset: {dataset}")
+    except Exception as e:
+        print(f"Error in experiment with dataset {dataset}: {str(e)}")
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
 
     print("\nAll experiments completed!")
 
