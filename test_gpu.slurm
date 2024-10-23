@@ -8,8 +8,7 @@
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=1
 #SBATCH --mem=4G
-#SBATCH --gres=gpu:H100:1
-#SBATCH --constraint=H100
+#SBATCH --gres=gpu:1
 
 # Enable debugging
 set -x
