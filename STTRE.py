@@ -528,24 +528,20 @@ def train_test(embed_size, heads, num_layers, dropout, forward_expansion, lr, ba
         # Initialize early stopping
         early_stopping = EarlyStopping(patience=10, verbose=True)
 
-        # Add gradient scaler for mixed precision training
-        scaler = torch.cuda.amp.GradScaler()
-        
-        # Training loop with mixed precision
+        # Training loop without mixed precision
         for epoch in range(NUM_EPOCHS):
             model.train()
             for inputs, labels in train_dataloader:
                 inputs, labels = inputs.to(device), labels.to(device)
                 optimizer.zero_grad()
                 
-                # Use mixed precision training
-                with torch.cuda.amp.autocast():
-                    outputs = model(inputs, dropout)
-                    loss = loss_fn(outputs, labels)
+                # Remove autocast context
+                outputs = model(inputs, dropout)
+                loss = loss_fn(outputs, labels)
                 
-                scaler.scale(loss).backward()
-                scaler.step(optimizer)
-                scaler.update()
+                # Normal backward pass
+                loss.backward()
+                optimizer.step()
                 
                 # Clear cache periodically
                 if torch.cuda.is_available():
@@ -721,3 +717,4 @@ if __name__ == "__main__":
             continue
 
     print("\nAll experiments completed!")
+
