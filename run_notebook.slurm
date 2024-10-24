@@ -55,6 +55,8 @@ module purge || { echo "Failed to purge modules"; exit 1; }
 module load hpc-env/13.1 || { echo "Failed to load hpc-env module"; exit 1; }
 module load Mamba/24.3.0-0 || { echo "Failed to load Mamba module"; exit 1; }
 module load CUDA/12.4.0 || { echo "Failed to load CUDA module"; exit 1; }
+module load JupyterNotebook/7.0.4-GCCcore-13.1.0 || { echo "Failed to load JupyterNotebook module"; exit 1; }
+module load PyTorch/2.1.2-foss-2023a-CUDA-12.4.0 || { echo "Failed to load PyTorch module"; exit 1; }
 module list
 
 # Activate conda environment

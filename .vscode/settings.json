@@ -1,0 +1,6 @@
+{
+    "python.defaultInterpreterPath": "/user/taed7566/.conda/envs/wind_forecasting_cuda/bin/python",
+    "python.terminal.activateEnvironment": true,
+    "terminal.integrated.inheritEnv": true,
+    "python.terminal.activateEnvInCurrentTerminal": true
+}
