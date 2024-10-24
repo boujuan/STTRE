@@ -563,8 +563,7 @@ def train_test(embed_size, heads, num_layers, dropout, forward_expansion, lr, ba
             optimizer, 
             mode='min', 
             factor=0.5, 
-            patience=10,  # Increase patience
-            verbose=True
+            patience=10
         )
         loss_fn = nn.MSELoss()
 
@@ -576,11 +575,13 @@ def train_test(embed_size, heads, num_layers, dropout, forward_expansion, lr, ba
             'val': {'MSE': [], 'MAE': [], 'MAPE': []}
         }
 
-        # Modify the training loop to compute metrics less frequently
+        # Modify the training loop
         for epoch in range(NUM_EPOCHS):
-            # Training phase
             model.train()
-            epoch_loss = 0
+            train_loss = 0
+            num_batches = 0
+            
+            # Training phase
             for inputs, labels in train_dataloader:
                 inputs, labels = inputs.to(device), labels.to(device)
                 optimizer.zero_grad(set_to_none=True)
@@ -593,25 +594,34 @@ def train_test(embed_size, heads, num_layers, dropout, forward_expansion, lr, ba
                 torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
                 optimizer.step()
                 
-                # Update metrics only if we're going to log this epoch
-                if epoch % 5 == 0:
-                    for metric in metrics['train'].values():
-                        metric.update(outputs, labels)
+                train_loss += loss.item()
+                num_batches += 1
                 
-                epoch_loss += loss.item()
+                # Update metrics every batch
+                for metric in metrics['train'].values():
+                    metric.update(outputs, labels)
+
+            # Calculate average training loss
+            train_loss = train_loss / num_batches
 
             # Validation phase
-            if epoch % 5 == 0:  # Only compute validation metrics every 5 epochs
-                model.eval()
-                val_loss = 0
-                with torch.no_grad():
-                    for inputs, labels in test_dataloader:
-                        inputs, labels = inputs.to(device), labels.to(device)
-                        outputs = model(inputs, 0)
-                        val_loss += loss_fn(outputs, labels).item()
-                        
-                        for metric in metrics['val'].values():
-                            metric.update(outputs, labels)
+            model.eval()
+            val_loss = 0
+            num_val_batches = 0
+            
+            with torch.no_grad():
+                for inputs, labels in test_dataloader:
+                    inputs, labels = inputs.to(device), labels.to(device)
+                    outputs = model(inputs, 0)
+                    val_loss += loss_fn(outputs, labels).item()
+                    num_val_batches += 1
+                    
+                    # Update validation metrics every batch
+                    for metric in metrics['val'].values():
+                        metric.update(outputs, labels)
+
+            # Calculate average validation loss
+            val_loss = val_loss / num_val_batches
 
             # Compute and store metrics
             current_metrics = {
@@ -627,21 +637,25 @@ def train_test(embed_size, heads, num_layers, dropout, forward_expansion, lr, ba
                     metric.reset()
 
             # Learning rate scheduling
-            scheduler.step(current_metrics['val']['mse'])
+            scheduler.step(val_loss)
             
             # Early stopping check
-            early_stopping(current_metrics['val']['mse'], model, f'best_model_{dataset}.pth')
+            early_stopping(val_loss, model, f'best_model_{dataset}.pth')
             
             # Logging every 5 epochs
             if epoch % 5 == 0:
                 plot_metrics(history['train'], history['val'], ['MSE', 'MAE', 'MAPE'], dataset)
                 print(f'Epoch {epoch+1}/{NUM_EPOCHS}')
-                print(f'Train MSE: {current_metrics["train"]["mse"]:.4f}, MAE: {current_metrics["train"]["mae"]:.4f}, MAPE: {current_metrics["train"]["mape"]:.4f}')
-                print(f'Val MSE: {current_metrics["val"]["mse"]:.4f}, MAE: {current_metrics["val"]["mae"]:.4f}, MAPE: {current_metrics["val"]["mape"]:.4f}')
+                print(f'Train Loss: {train_loss:.4f}, MSE: {current_metrics["train"]["mse"]:.4f}, MAE: {current_metrics["train"]["mae"]:.4f}, MAPE: {current_metrics["train"]["mape"]:.4f}')
+                print(f'Val Loss: {val_loss:.4f}, MSE: {current_metrics["val"]["mse"]:.4f}, MAE: {current_metrics["val"]["mae"]:.4f}, MAPE: {current_metrics["val"]["mape"]:.4f}')
 
             if early_stopping.early_stop:
                 print(f"Early stopping triggered after {epoch+1} epochs")
                 break
+
+            # Clear GPU memory after each epoch
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
 
         return history
 
@@ -649,7 +663,7 @@ def train_test(embed_size, heads, num_layers, dropout, forward_expansion, lr, ba
         print(f"Error in training: {e}")
         raise e
     finally:
-        plt.close('all')  # Ensure all figures are closed
+        plt.close('all')
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
 
