@@ -29,7 +29,7 @@ class Colors:
     CYAN = '\033[96m'      # Light/Bright Cyan
     MAGENTA = '\033[95m'   # Light/Bright Magenta
     
-    # Bold/Bright colors
+    # Bold colors
     BOLD_BLUE = '\033[1;34m'
     BOLD_GREEN = '\033[1;32m'
     BOLD_RED = '\033[1;31m'
@@ -138,8 +138,61 @@ class IstanbulStock(BaseDataset):
         super().__init__(dir, seq_len, columns=range(8))
 
 class AirQuality(BaseDataset):
-    def __init__(self, dir, seq_len=24):
-        super().__init__(dir, seq_len, columns=range(12))
+    def __init__(self, dir=None, seq_len=24):
+        try:
+            from ucimlrepo import fetch_ucirepo
+            
+            # Fetch Beijing PM2.5 dataset
+            beijing_pm2_5 = fetch_ucirepo(id=381)
+            
+            # Get features DataFrame and convert to polars
+            features_df = pl.from_pandas(beijing_pm2_5.data.features)
+            
+            # Convert wind direction to one-hot encoding
+            # Get unique wind directions and create dummy columns
+            wind_dummies = features_df.get_column('cbwd').unique()
+            for direction in wind_dummies:
+                features_df = features_df.with_columns(
+                    pl.when(pl.col('cbwd') == direction)
+                    .then(1)
+                    .otherwise(0)
+                    .alias(f'wind_{direction}')
+                )
+            
+            # Drop original categorical column
+            features_df = features_df.drop('cbwd')
+            
+            # Convert to numpy arrays and handle missing values
+            X = features_df.to_numpy().astype(np.float32)
+            y = beijing_pm2_5.data.targets.to_numpy().astype(np.float32)
+            
+            # Combine features and target
+            data = np.column_stack((X, y))
+            
+            # Remove rows with missing values
+            data = data[~np.isnan(data).any(axis=1)]
+            
+            self.seq_len = seq_len
+            self.X = self.normalize(data[:, :-1])
+            self.y = data[:, [-1]]
+            self.len = len(self.y)
+            
+        except Exception as e:
+            print(f"Error fetching UCI data: {str(e)}")
+            raise
+
+    def __len__(self):
+        return self.len - self.seq_len - 1
+
+    def __getitem__(self, idx):
+        x = np.transpose(self.X[idx:idx+self.seq_len])
+        label = self.y[idx+self.seq_len+1]
+        return torch.tensor(x, dtype=torch.float), torch.tensor(label, dtype=torch.float)
+
+    def normalize(self, X):
+        X = np.transpose(X)
+        X_norm = [(x - np.min(x)) / (np.max(x) - np.min(x)) for x in X]
+        return np.transpose(X_norm)
 
 class Traffic(BaseDataset):
     def __init__(self, dir, seq_len=24):
@@ -750,6 +803,10 @@ def format_validation_results(results, initial_metrics):
     
     return '\n'.join(output)
 
+########################################################################################
+###################################### MAIN ############################################
+########################################################################################
+
 def main(mode='both'):
     """
     Run the STTRE model in different modes.
@@ -760,28 +817,42 @@ def main(mode='both'):
         raise ValueError("Mode must be one of: 'train', 'validate', 'both'")
 
     Config.create_directories()
-
+    
+    '''
+    MODEL PARAMETERS
+    
+    [UBER]
+    embed_size: 64
+    heads: 8
+    num_layers: 4
+    forward_expansion: 2
+    dropout: 0.15
+    lr: 0.00005
+    batch_size: 256
+    NUM_EPOCHS: 1000
+    TEST_SPLIT: 0.2
+    '''
     model_params = {
-        'embed_size': 32,
-        'heads': 4,
-        'num_layers': 3,
-        'forward_expansion': 1
+        'embed_size': 32, # Default: 32
+        'heads': 4, # Default: 4
+        'num_layers': 3, # Default: 3
+        'forward_expansion': 1 # Default: 1
     }
 
     train_params = {
-        'dropout': 0.2,
-        'lr': 0.0001,
-        'batch_size': 512,
-        'NUM_EPOCHS': 1000,
-        'TEST_SPLIT': 0.3
+        'dropout': 0.2, # Default: 0.2
+        'lr': 0.0001, # Default: 0.0001
+        'batch_size': 512, # Default: 512
+        'NUM_EPOCHS': 1000, # Default: 1000
+        'TEST_SPLIT': 0.3 # Default: 0.3
     }
 
     trainer = STTRETrainer(model_params, train_params)
 
     datasets = {
-        'Uber': (Uber, os.path.join(Config.DATA_DIR, 'uber_stock.csv')),
+        # 'Uber': (Uber, os.path.join(Config.DATA_DIR, 'uber_stock.csv')),
+        'AirQuality': (AirQuality, None),
         # 'IstanbulStock': (IstanbulStock, os.path.join(Config.DATA_DIR, 'istanbul_stock.csv')),
-        # 'AirQuality': (AirQuality, os.path.join(Config.DATA_DIR, 'air_quality.csv')),
         # 'Traffic': (Traffic, os.path.join(Config.DATA_DIR, 'traffic.csv')),
         # 'AppliancesEnergy1': (AppliancesEnergy1, os.path.join(Config.DATA_DIR, 'appliances_energy1.csv')),
         # 'AppliancesEnergy2': (AppliancesEnergy2, os.path.join(Config.DATA_DIR, 'appliances_energy2.csv'))
@@ -826,3 +897,4 @@ def main(mode='both'):
 if __name__ == "__main__":
     # You can change this to 'train', 'validate', or 'both'
     main(mode='both')
+

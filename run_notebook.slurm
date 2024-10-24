@@ -13,6 +13,7 @@
 
 # Check current usage
 # squeue -o "%.18i %.9P %.8j %.8u %.2t %.10M %.6D %R"
+# squeue -p all_gpu.p
 # squeue -u $USER
 
 # srun --partition=all_gpu.p --nodelist=mpcg004 --nodes=1 --ntasks=1 --cpus-per-task=8 --mem=16G --gres=gpu:H100:1 --time=02:00:00 --pty bash -i
