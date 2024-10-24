@@ -16,8 +16,45 @@ import matplotlib.pyplot as plt
 from pathlib import Path
 import seaborn as sns
 import polars as pl
+import sys
 
 warnings.filterwarnings('ignore', category=UserWarning, module='pandas.core.computation.expressions')
+
+class Colors:
+    # Regular colors
+    BLUE = '\033[94m'      # Light/Bright Blue
+    RED = '\033[91m'       # Light/Bright Red
+    GREEN = '\033[92m'     # Light/Bright Green
+    YELLOW = '\033[93m'    # Light/Bright Yellow
+    CYAN = '\033[96m'      # Light/Bright Cyan
+    MAGENTA = '\033[95m'   # Light/Bright Magenta
+    
+    # Bold/Bright colors
+    BOLD_BLUE = '\033[1;34m'
+    BOLD_GREEN = '\033[1;32m'
+    
+    # Text style
+    BOLD = '\033[1m'
+    UNDERLINE = '\033[4m'
+    
+    # End color
+    ENDC = '\033[0m'
+    
+    @classmethod
+    def disable_colors(cls):
+        """Disable colors if terminal doesn't support them"""
+        for attr in dir(cls):
+            if not attr.startswith('__') and isinstance(getattr(cls, attr), str):
+                setattr(cls, attr, '')
+
+    @staticmethod
+    def supports_color():
+        """Check if the terminal supports colors"""
+        return hasattr(sys.stdout, 'isatty') and sys.stdout.isatty()
+
+# Initialize colors based on terminal support
+if not Colors.supports_color():
+    Colors.disable_colors()
 
 class Config:
     HOME = str(Path.home())
@@ -310,12 +347,13 @@ class EarlyStopping:
         elif val_loss > self.best_loss + self.min_delta:
             self.counter += 1
             if self.verbose:
-                print(f'Epoch {self.current_epoch}: Validation loss increased ({self.best_loss:.6f} --> {val_loss:.6f}) (EarlyStopping [{self.counter} / {self.patience}])')
+                print(f'{Colors.BOLD_GREEN}Epoch {self.current_epoch}:{Colors.ENDC}{Colors.RED} Validation loss increased ({self.best_loss:.6f} --> {val_loss:.6f}){Colors.ENDC}')
+                print(f'{Colors.RED}EarlyStopping counter: {self.counter} out of {self.patience}{Colors.ENDC}')
             if self.counter >= self.patience:
                 self.early_stop = True
         else:
             if self.verbose and (self.best_loss - val_loss) > self.min_delta:
-                print(f'Epoch {self.current_epoch}: Validation loss decreased ({self.best_loss:.6f} --> {val_loss:.6f})')
+                print(f'{Colors.BOLD_GREEN}Epoch {self.current_epoch}:{Colors.ENDC}{Colors.BLUE} Validation loss decreased ({self.best_loss:.6f} --> {val_loss:.6f}){Colors.ENDC}')
             self.best_loss = val_loss
             self.save_checkpoint(val_loss, model, path)
             self.counter = 0
@@ -522,9 +560,15 @@ class STTRETrainer:
             early_stopping(val_loss, model, f'best_model_{dataset_name}.pth', epoch + 1)
             
             if epoch % 5 == 0:
-                print(f'Epoch {epoch+1}/{self.train_params["NUM_EPOCHS"]}')
-                print(f'Train Loss: {train_loss:.4f}, MSE: {current_metrics["train"]["mse"]:.4f}, MAE: {current_metrics["train"]["mae"]:.4f}, MAPE: {current_metrics["train"]["mape"]:.4f}')
-                print(f'Val Loss: {val_loss:.4f}, MSE: {current_metrics["val"]["mse"]:.4f}, MAE: {current_metrics["val"]["mae"]:.4f}, MAPE: {current_metrics["val"]["mape"]:.4f}')
+                # print(f'{Colors.BOLD_BLUE}Epoch {epoch+1}/{self.train_params["NUM_EPOCHS"]}{Colors.ENDC}')
+                print(f'{Colors.CYAN}Train Loss: {train_loss:.4f}, '
+                      f'MSE: {current_metrics["train"]["mse"]:.4f}, '
+                      f'MAE: {current_metrics["train"]["mae"]:.4f}, '
+                      f'MAPE: {current_metrics["train"]["mape"]:.4f}{Colors.ENDC}')
+                print(f'{Colors.YELLOW}Val Loss: {val_loss:.4f}, '
+                      f'MSE: {current_metrics["val"]["mse"]:.4f}, '
+                      f'MAE: {current_metrics["val"]["mae"]:.4f}, '
+                      f'MAPE: {current_metrics["val"]["mape"]:.4f}{Colors.ENDC}')
 
             if early_stopping.early_stop:
                 print(f"Early stopping triggered after {epoch+1} epochs")
@@ -606,7 +650,7 @@ def main(mode='both'):
     }
 
     for dataset_name, (dataset_class, data_path) in datasets.items():
-        print(f"\nProcessing {dataset_name} dataset")
+        print(f"\n{Colors.BOLD_GREEN}Processing {dataset_name} dataset{Colors.ENDC}")
         train_dataloader, test_dataloader = trainer.prepare_data(dataset_class, data_path)
         
         if train_dataloader is None or test_dataloader is None:
@@ -619,28 +663,28 @@ def main(mode='both'):
 
             # Training phase
             if mode in ['train', 'both']:
-                print(f"Training {dataset_name}...")
+                print(f"{Colors.MAGENTA}Training {dataset_name}...{Colors.ENDC}")
                 history = trainer.train(train_dataloader, test_dataloader, dataset_name)
-                print(f"Completed training on {dataset_name} dataset")
+                print(f"{Colors.BOLD_GREEN}Completed training on {dataset_name} dataset{Colors.ENDC}")
 
             # Validation phase
             if mode in ['validate', 'both']:
-                print(f"Validating {dataset_name}...")
+                print(f"{Colors.MAGENTA}Validating {dataset_name}...{Colors.ENDC}")
                 model_path = os.path.join(Config.MODEL_DIR, f'best_model_{dataset_name}.pth')
                 if not os.path.exists(model_path):
                     print(f"No trained model found for {dataset_name} at {model_path}")
                     continue
                     
                 validation_results = trainer.validate(model_path, test_dataloader)
-                print(f"Validation results for {dataset_name}:")
+                print(f"{Colors.CYAN}Validation results for {dataset_name}:{Colors.ENDC}")
                 print(validation_results)
 
         except Exception as e:
-            print(f"Error in experiment with dataset {dataset_name}: {str(e)}")
+            print(f"{Colors.RED}Error in experiment with dataset {dataset_name}: {str(e)}{Colors.ENDC}")
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
 
-    print("\nAll experiments completed!")
+    print(f"\n{Colors.BOLD_GREEN}All experiments completed!{Colors.ENDC}")
 
 if __name__ == "__main__":
     # You can change this to 'train', 'validate', or 'both'
