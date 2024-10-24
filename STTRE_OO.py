@@ -635,7 +635,9 @@ class STTRETrainer:
 
     def validate(self, model_path, test_dataloader):
         inputs, _ = next(iter(test_dataloader))
-        model = STTRE(
+        
+        # Create model for initial metrics (untrained)
+        initial_model = STTRE(
             inputs.shape, 
             1, 
             embed_size=self.model_params['embed_size'],
@@ -644,8 +646,19 @@ class STTRETrainer:
             heads=self.model_params['heads']
         ).to(self.device)
         
-        model.load_state_dict(torch.load(model_path, weights_only=True))
-        model.eval()
+        # Create model for final metrics (trained)
+        trained_model = STTRE(
+            inputs.shape, 
+            1, 
+            embed_size=self.model_params['embed_size'],
+            num_layers=self.model_params['num_layers'],
+            forward_expansion=self.model_params['forward_expansion'],
+            heads=self.model_params['heads']
+        ).to(self.device)
+        
+        # Load trained weights
+        trained_model.load_state_dict(torch.load(model_path, weights_only=True))
+        trained_model.eval()
 
         metrics = {
             'mse': MeanSquaredError().to(self.device),
@@ -653,29 +666,25 @@ class STTRETrainer:
             'mape': MeanAbsolutePercentageError().to(self.device)
         }
 
-        # Capture initial metrics
-        initial_metrics = None
+        # Capture initial metrics with untrained model
+        initial_metrics = {}
         with torch.no_grad():
             for inputs, labels in test_dataloader:
                 inputs, labels = inputs.to(self.device), labels.to(self.device)
-                outputs = model(inputs, 0)
+                outputs = initial_model(inputs, 0)
                 
-                initial_metrics = {
-                    'mse': metrics['mse'](outputs, labels).item(),
-                    'mae': metrics['mae'](outputs, labels).item(),
-                    'mape': metrics['mape'](outputs, labels).item()
-                }
-                break  # We only need one batch for initial metrics
+                for name, metric in metrics.items():
+                    metric.update(outputs, labels)
+                
+            for name, metric in metrics.items():
+                initial_metrics[name] = metric.compute().item()
+                metric.reset()
         
-        # Reset metrics for full validation
-        for metric in metrics.values():
-            metric.reset()
-        
-        # Perform full validation
+        # Perform validation with trained model
         with torch.no_grad():
             for inputs, labels in test_dataloader:
                 inputs, labels = inputs.to(self.device), labels.to(self.device)
-                outputs = model(inputs, 0)
+                outputs = trained_model(inputs, 0)
                 
                 for metric in metrics.values():
                     metric.update(outputs, labels)
@@ -701,24 +710,36 @@ def format_validation_results(results, initial_metrics):
     
     # Add each metric with formatting
     for metric, (short_name, emoji, full_name) in metrics_info.items():
-        value = results[metric]
-        initial_value = initial_metrics[metric] if initial_metrics else value
+        final_value = results[metric]
+        initial_value = initial_metrics[metric]
         
-        # Create visual bar based on improvement from initial value
-        max_bars = 20
-        if initial_value == 0:  # Prevent division by zero
-            normalized_value = 1.0
+        # Calculate improvement percentage
+        if initial_value > 0:  # Prevent division by zero
+            improvement = (initial_value - final_value) / initial_value
+            improvement = max(0, min(1, improvement))  # Clamp between 0 and 1
         else:
-            # Calculate how much the error has been reduced from initial value
-            normalized_value = max(0, min(1, 1 - value/initial_value))
+            improvement = 0
+            
+        # Create visual bar based on improvement
+        max_bars = 20
+        bars = '█' * int(improvement * max_bars) + '░' * (max_bars - int(improvement * max_bars))
         
-        bars = '█' * int(normalized_value * max_bars) + '░' * (max_bars - int(normalized_value * max_bars))
+        # Calculate percentage improvement
+        percentage = improvement * 100
         
+        # Color code based on improvement
+        if percentage > 50:
+            value_color = Colors.BOLD_GREEN
+        elif percentage > 25:
+            value_color = Colors.BOLD_BLUE
+        else:
+            value_color = Colors.BOLD_RED
+            
         output.extend([
-            f"{Colors.CYAN}{emoji} {short_name}: {Colors.BOLD}{value:.6f}{Colors.ENDC}",
-            f"{Colors.YELLOW}├─ {full_name}{Colors.ENDC}",
+            f"{Colors.CYAN}{emoji} {short_name}:{Colors.ENDC}",
             f"{Colors.YELLOW}├─ Initial: {initial_value:.6f}{Colors.ENDC}",
-            f"{Colors.GREEN}└─ Performance: |{bars}| {normalized_value:.1%} improvement{Colors.ENDC}\n"
+            f"{Colors.YELLOW}├─ Final:   {value_color}{final_value:.6f}{Colors.ENDC}",
+            f"{Colors.GREEN}└─ Improvement: |{bars}| {percentage:.1f}%{Colors.ENDC}\n"
         ])
     
     # Footer
