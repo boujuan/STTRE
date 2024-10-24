@@ -479,170 +479,167 @@ def plot_metrics(train_metrics, val_metrics, metric_names, dataset):
         axes[i].grid(True)
     
     plt.tight_layout()
-    plt.savefig(os.path.join(PLOT_DIR, f'{dataset}_metrics.png'))
-    plt.close()
+    plt.savefig(os.path.join(PLOT_DIR, f'{dataset}_metrics_{len(train_metrics["MSE"])}.png'))
+    plt.close('all')  # Close all figures to prevent memory leak
 
 def train_test(embed_size, heads, num_layers, dropout, forward_expansion, lr, batch_size, dir, dataset, NUM_EPOCHS=100, TEST_SPLIT=0.3):
     try:
         datasets = ['Uber', 'Traffic', 'AirQuality', 'AppliancesEnergy1', 'AppliancesEnergy2', 'IstanbulStock']
         assert (datasets.__contains__(dataset)), "Invalid dataset"
 
-        #call dataset class
-        if dataset == 'Uber':
-            train_data = Uber(dir)
-        elif dataset == 'Traffic':
-            train_data = Traffic(dir)
-        elif dataset == 'AirQuality':
-            train_data = AirQuality(dir)
-        elif dataset == 'AppliancesEnergy1':
-            train_data = AppliancesEnergy1(dir)
-        elif dataset == 'AppliancesEnergy2':
-            train_data = AppliancesEnergy2(dir)
-        elif dataset == 'IstanbulStock':
-            train_data = IstanbulStock(dir)
+        # Dataset selection
+        dataset_classes = {
+            'Uber': Uber,
+            'Traffic': Traffic,
+            'AirQuality': AirQuality,
+            'AppliancesEnergy1': AppliancesEnergy1,
+            'AppliancesEnergy2': AppliancesEnergy2,
+            'IstanbulStock': IstanbulStock
+        }
+        
+        # Initialize dataset
+        train_data = dataset_classes[dataset](dir)
 
-        #split into train and test
+        # Data splitting
         dataset_size = len(train_data)
         indices = list(range(dataset_size))
         split = int(np.floor(TEST_SPLIT * dataset_size))
+        
+        # Use random split with fixed seed for reproducibility
+        np.random.seed(42)
+        np.random.shuffle(indices)
         train_indices, test_indices = indices[split:], indices[:split]
+        
         train_sampler = SubsetRandomSampler(train_indices)
         test_sampler = SubsetRandomSampler(test_indices)
-        train_dataloader = torch.utils.data.DataLoader(train_data, batch_size=batch_size,
-                                                sampler=train_sampler)
-        test_dataloader = torch.utils.data.DataLoader(train_data, batch_size=batch_size,
-                                                    sampler=test_sampler)
-
-        # Initialize metrics
-        train_mse = MeanSquaredError().to(device)
-        train_mae = MeanAbsoluteError().to(device)
-        train_mape = MeanAbsolutePercentageError().to(device)
         
-        val_mse = MeanSquaredError().to(device)
-        val_mae = MeanAbsoluteError().to(device)
-        val_mape = MeanAbsolutePercentageError().to(device)
+        # DataLoaders with num_workers for parallel data loading
+        train_dataloader = DataLoader(
+            train_data, 
+            batch_size=batch_size,
+            sampler=train_sampler,
+            num_workers=4,
+            pin_memory=True
+        )
+        test_dataloader = DataLoader(
+            train_data, 
+            batch_size=batch_size,
+            sampler=test_sampler,
+            num_workers=4,
+            pin_memory=True
+        )
 
-        # Initialize model and optimizer
+        # Initialize metrics on device
+        metrics = {
+            'train': {
+                'mse': MeanSquaredError().to(device),
+                'mae': MeanAbsoluteError().to(device),
+                'mape': MeanAbsolutePercentageError().to(device)
+            },
+            'val': {
+                'mse': MeanSquaredError().to(device),
+                'mae': MeanAbsoluteError().to(device),
+                'mape': MeanAbsolutePercentageError().to(device)
+            }
+        }
+
+        # Model initialization
         inputs, _ = next(iter(train_dataloader))
-        model = Transformer(inputs.shape, 1, embed_size=embed_size, num_layers=num_layers,
-                           forward_expansion=forward_expansion, heads=heads).to(device)
-        optimizer = torch.optim.Adam(model.parameters(), lr=lr)
-        loss_fn = torch.nn.MSELoss()
+        model = Transformer(
+            inputs.shape, 
+            1, 
+            embed_size=embed_size,
+            num_layers=num_layers,
+            forward_expansion=forward_expansion,
+            heads=heads
+        ).to(device)
         
+        # Optimizer with gradient clipping
+        optimizer = torch.optim.Adam(model.parameters(), lr=lr)
+        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+            optimizer, 
+            mode='min', 
+            factor=0.5, 
+            patience=5, 
+            verbose=True
+        )
+        loss_fn = nn.MSELoss()
+
         # Initialize tracking variables
         best_val_loss = float('inf')
-        patience_counter = 0
-        patience = 10 
-
-        # Metric history
+        early_stopping = EarlyStopping(patience=10, verbose=True)
         history = {
             'train': {'MSE': [], 'MAE': [], 'MAPE': []},
             'val': {'MSE': [], 'MAE': [], 'MAPE': []}
         }
 
-        # Initialize early stopping
-        early_stopping = EarlyStopping(patience=10, verbose=True)
-
-        # Training loop without mixed precision
         for epoch in range(NUM_EPOCHS):
+            # Training phase
             model.train()
             for inputs, labels in train_dataloader:
                 inputs, labels = inputs.to(device), labels.to(device)
-                optimizer.zero_grad()
+                optimizer.zero_grad(set_to_none=True)  # More efficient than zero_grad()
                 
-                # Forward pass
                 outputs = model(inputs, dropout)
                 loss = loss_fn(outputs, labels)
-                
-                # Backward pass
                 loss.backward()
+                
+                # Gradient clipping
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+                
                 optimizer.step()
                 
-                # Clear cache periodically
-                # if torch.cuda.is_available():
-                #     torch.cuda.empty_cache()
-                
                 # Update metrics
-                train_mse.update(outputs, labels)
-                train_mae.update(outputs, labels)
-                train_mape.update(outputs, labels)
+                for metric in metrics['train'].values():
+                    metric.update(outputs, labels)
 
-            # Validation loop
+            # Validation phase
             model.eval()
             with torch.no_grad():
                 for inputs, labels in test_dataloader:
                     inputs, labels = inputs.to(device), labels.to(device)
                     outputs = model(inputs, 0)
                     
-                    # Update metrics
-                    val_mse.update(outputs, labels)
-                    val_mae.update(outputs, labels)
-                    val_mape.update(outputs, labels)
+                    for metric in metrics['val'].values():
+                        metric.update(outputs, labels)
 
-            # Compute epoch metrics
-            epoch_train_mse = train_mse.compute()
-            epoch_train_mae = train_mae.compute()
-            epoch_train_mape = train_mape.compute()
+            # Compute and store metrics
+            current_metrics = {
+                'train': {},
+                'val': {}
+            }
             
-            epoch_val_mse = val_mse.compute()
-            epoch_val_mae = val_mae.compute()
-            epoch_val_mape = val_mape.compute()
+            for phase in ['train', 'val']:
+                for name, metric in metrics[phase].items():
+                    value = metric.compute()
+                    current_metrics[phase][name] = value
+                    history[phase][name.upper()].append(value.item())
+                    metric.reset()
+
+            # Learning rate scheduling
+            scheduler.step(current_metrics['val']['mse'])
             
-            early_stopping(epoch_val_mse, model, f'best_model_{dataset}.pth')
-            if early_stopping.early_stop:
-                print("Early stopping triggered")
-                break
-
-            # Store metrics
-            history['train']['MSE'].append(epoch_train_mse.item())
-            history['train']['MAE'].append(epoch_train_mae.item())
-            history['train']['MAPE'].append(epoch_train_mape.item())
-            
-            history['val']['MSE'].append(epoch_val_mse.item())
-            history['val']['MAE'].append(epoch_val_mae.item())
-            history['val']['MAPE'].append(epoch_val_mape.item())
-
-            # Reset metrics for next epoch
-            train_mse.reset()
-            train_mae.reset()
-            train_mape.reset()
-            val_mse.reset()
-            val_mae.reset()
-            val_mape.reset()
-
             # Early stopping check
-            if epoch_val_mse < best_val_loss:
-                best_val_loss = epoch_val_mse
-                patience_counter = 0
-                # Save best model to MODEL_DIR
-                model_path = os.path.join(MODEL_DIR, f'best_model_{dataset}.pth')
-                torch.save(model.state_dict(), model_path)
-            else:
-                patience_counter += 1
-
-            # Plot metrics every 5 epochs
+            early_stopping(current_metrics['val']['mse'], model, f'best_model_{dataset}.pth')
+            
+            # Logging every 5 epochs
             if epoch % 5 == 0:
-                plot_metrics(
-                    history['train'],
-                    history['val'],
-                    ['MSE', 'MAE', 'MAPE'],
-                    dataset
-                )
+                plot_metrics(history['train'], history['val'], ['MSE', 'MAE', 'MAPE'], dataset)
                 print(f'Epoch {epoch+1}/{NUM_EPOCHS}')
-                print(f'Train MSE: {epoch_train_mse:.4f}, MAE: {epoch_train_mae:.4f}, MAPE: {epoch_train_mape:.4f}')
-                print(f'Val MSE: {epoch_val_mse:.4f}, MAE: {epoch_val_mae:.4f}, MAPE: {epoch_val_mape:.4f}')
+                print(f'Train MSE: {current_metrics["train"]["mse"]:.4f}, MAE: {current_metrics["train"]["mae"]:.4f}, MAPE: {current_metrics["train"]["mape"]:.4f}')
+                print(f'Val MSE: {current_metrics["val"]["mse"]:.4f}, MAE: {current_metrics["val"]["mae"]:.4f}, MAPE: {current_metrics["val"]["mape"]:.4f}')
 
-            # Early stopping
-            if patience_counter >= patience:
-                print(f'Early stopping triggered after {epoch+1} epochs')
+            if early_stopping.early_stop:
+                print(f"Early stopping triggered after {epoch+1} epochs")
                 break
 
         return history
+
     except Exception as e:
         print(f"Error in training: {e}")
         raise e
     finally:
-        # Clean up GPU memory
+        plt.close('all')  # Ensure all figures are closed
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
 
