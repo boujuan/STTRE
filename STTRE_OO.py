@@ -32,6 +32,7 @@ class Colors:
     # Bold/Bright colors
     BOLD_BLUE = '\033[1;34m'
     BOLD_GREEN = '\033[1;32m'
+    BOLD_RED = '\033[1;31m'
     
     # Text style
     BOLD = '\033[1m'
@@ -339,6 +340,28 @@ class STTRE(nn.Module):
 
         return out
 
+class ProgressBar:
+    def __init__(self, initial_error, target_error=0, width=50):
+        self.initial_error = initial_error
+        self.target_error = target_error
+        self.width = width
+        self.best_error = initial_error
+        
+    def update(self, current_error):
+        self.best_error = min(self.best_error, current_error)
+        # Calculate progress (0 to 1) where 1 means error reduced to target
+        progress = 1 - (self.best_error - self.target_error) / (self.initial_error - self.target_error)
+        progress = max(0, min(1, progress))  # Clamp between 0 and 1
+        
+        # Create the progress bar
+        filled_length = int(self.width * progress)
+        bar = '█' * filled_length + '░' * (self.width - filled_length)
+        
+        # Calculate percentage
+        percent = progress * 100
+        
+        return f'{Colors.BOLD_BLUE}Progress: |{Colors.GREEN}{bar}{Colors.BOLD_BLUE}| {percent:6.2f}% {Colors.ENDC}'
+
 class EarlyStopping:
     def __init__(self, patience=10, min_delta=0, verbose=True):
         self.patience = patience
@@ -349,8 +372,13 @@ class EarlyStopping:
         self.early_stop = False
         self.val_loss_min = float('inf')
         self.current_epoch = 0
+        self.progress_bar = None
 
     def __call__(self, val_loss, model, path, epoch=None):
+        # Initialize progress bar with first validation loss if not exists
+        if self.progress_bar is None:
+            self.progress_bar = ProgressBar(val_loss)
+            
         self.current_epoch = epoch if epoch is not None else self.current_epoch + 1
         
         if self.best_loss is None:
@@ -359,14 +387,15 @@ class EarlyStopping:
         elif val_loss > self.best_loss + self.min_delta:
             self.counter += 1
             if self.verbose:
-                print(f'{Colors.RED}Epoch {self.current_epoch}: Validation loss increased ({self.best_loss:.6f} --> {val_loss:.6f}) {Colors.CROSS}{Colors.ENDC}')
-                print(f'{Colors.RED}EarlyStopping counter: {self.counter} out of {self.patience} {Colors.WARNING}{Colors.ENDC}')
+                print(f'\n{Colors.BOLD_GREEN}Epoch {self.current_epoch}:{Colors.ENDC} {Colors.RED}Validation loss increased ({self.best_loss:.6f} --> {val_loss:.6f}) {Colors.CROSS}{Colors.ENDC} {Colors.BOLD_RED}[{self.counter}/{self.patience}]{Colors.ENDC}{Colors.WARNING}')
+                print(self.progress_bar.update(val_loss))
             if self.counter >= self.patience:
                 self.early_stop = True
         else:
             if self.verbose and (self.best_loss - val_loss) > self.min_delta:
-                print(f'{Colors.BLUE}Epoch {self.current_epoch}: Validation loss decreased ({self.best_loss:.6f} --> {val_loss:.6f}) {Colors.FIRE}{Colors.ENDC}')
-                print(f'{Colors.BLUE}Saving model... {Colors.SAVE}{Colors.ENDC}')
+                print(f'\n{Colors.BOLD_GREEN}Epoch {self.current_epoch}:{Colors.ENDC} {Colors.GREEN}Validation loss decreased ({self.best_loss:.6f} --> {val_loss:.6f}) {Colors.FIRE}{Colors.ENDC}')
+                # print(f'{Colors.BLUE}Saving model... {Colors.SAVE}{Colors.ENDC}')
+                print(self.progress_bar.update(val_loss))
             self.best_loss = val_loss
             self.save_checkpoint(val_loss, model, path)
             self.counter = 0
@@ -516,6 +545,13 @@ class STTRETrainer:
             }
         }
 
+        # Initialize progress bar with first batch loss
+        inputs, labels = next(iter(train_dataloader))
+        inputs, labels = inputs.to(self.device), labels.to(self.device)
+        outputs = model(inputs, self.train_params['dropout'])
+        initial_loss = loss_fn(outputs, labels).item()
+        progress_bar = ProgressBar(initial_loss)
+        
         for epoch in range(self.train_params['NUM_EPOCHS']):
             model.train()
             train_loss = 0
@@ -572,16 +608,19 @@ class STTRETrainer:
             
             early_stopping(val_loss, model, f'best_model_{dataset_name}.pth', epoch + 1)
             
-            if epoch % 5 == 0:
-                print(f'{Colors.BOLD_BLUE}Epoch {epoch+1}/{self.train_params["NUM_EPOCHS"]} {Colors.HOURGLASS}{Colors.ENDC}')
-                print(f'{Colors.CYAN}Train Loss: {train_loss:.4f}, '
-                      f'MSE: {current_metrics["train"]["mse"]:.4f}, '
-                      f'MAE: {current_metrics["train"]["mae"]:.4f}, '
-                      f'MAPE: {current_metrics["train"]["mape"]:.4f} {Colors.CHART}{Colors.ENDC}')
-                print(f'{Colors.YELLOW}Val Loss: {val_loss:.4f}, '
-                      f'MSE: {current_metrics["val"]["mse"]:.4f}, '
-                      f'MAE: {current_metrics["val"]["mae"]:.4f}, '
-                      f'MAPE: {current_metrics["val"]["mape"]:.4f} {Colors.BRAIN}{Colors.ENDC}')
+            # After validation phase, update and display progress
+            # if epoch % 5 == 0:
+            #     print(f'{Colors.BOLD_BLUE}Epoch {epoch+1}/{self.train_params["NUM_EPOCHS"]} {Colors.HOURGLASS}{Colors.ENDC}')
+            #     print(f'{Colors.CYAN}Train Loss: {train_loss:.4f}, '
+            #           f'MSE: {current_metrics["train"]["mse"]:.4f}, '
+            #           f'MAE: {current_metrics["train"]["mae"]:.4f}, '
+            #           f'MAPE: {current_metrics["train"]["mape"]:.4f} {Colors.CHART}{Colors.ENDC}')
+            #     print(f'{Colors.YELLOW}Val Loss: {val_loss:.4f}, '
+            #           f'MSE: {current_metrics["val"]["mse"]:.4f}, '
+            #           f'MAE: {current_metrics["val"]["mae"]:.4f}, '
+            #           f'MAPE: {current_metrics["val"]["mape"]:.4f} {Colors.BRAIN}{Colors.ENDC}')
+            #     print(progress_bar.update(val_loss))
+            #     print()  # Add empty line for readability
 
             if early_stopping.early_stop:
                 print(f"Early stopping triggered after {epoch+1} epochs")
@@ -614,6 +653,25 @@ class STTRETrainer:
             'mape': MeanAbsolutePercentageError().to(self.device)
         }
 
+        # Capture initial metrics
+        initial_metrics = None
+        with torch.no_grad():
+            for inputs, labels in test_dataloader:
+                inputs, labels = inputs.to(self.device), labels.to(self.device)
+                outputs = model(inputs, 0)
+                
+                initial_metrics = {
+                    'mse': metrics['mse'](outputs, labels).item(),
+                    'mae': metrics['mae'](outputs, labels).item(),
+                    'mape': metrics['mape'](outputs, labels).item()
+                }
+                break  # We only need one batch for initial metrics
+        
+        # Reset metrics for full validation
+        for metric in metrics.values():
+            metric.reset()
+        
+        # Perform full validation
         with torch.no_grad():
             for inputs, labels in test_dataloader:
                 inputs, labels = inputs.to(self.device), labels.to(self.device)
@@ -623,7 +681,53 @@ class STTRETrainer:
                     metric.update(outputs, labels)
 
         results = {name: metric.compute().item() for name, metric in metrics.items()}
-        return results
+        return results, initial_metrics
+
+def format_validation_results(results, initial_metrics):
+    """Creates a pretty formatted string for validation results"""
+    # Header
+    output = [
+        f"\n{Colors.BOLD_BLUE}{'='*60}{Colors.ENDC}",
+        f"{Colors.BOLD_BLUE}{'Final Validation Results':^60}{Colors.ENDC}",
+        f"{Colors.BOLD_BLUE}{'='*60}{Colors.ENDC}\n"
+    ]
+    
+    # Metrics with their corresponding emojis and descriptions
+    metrics_info = {
+        'mse': ('MSE', '📊', 'Mean Squared Error'),
+        'mae': ('MAE', '📏', 'Mean Absolute Error'),
+        'mape': ('MAPE', '📈', 'Mean Absolute Percentage Error')
+    }
+    
+    # Add each metric with formatting
+    for metric, (short_name, emoji, full_name) in metrics_info.items():
+        value = results[metric]
+        initial_value = initial_metrics[metric] if initial_metrics else value
+        
+        # Create visual bar based on improvement from initial value
+        max_bars = 20
+        if initial_value == 0:  # Prevent division by zero
+            normalized_value = 1.0
+        else:
+            # Calculate how much the error has been reduced from initial value
+            normalized_value = max(0, min(1, 1 - value/initial_value))
+        
+        bars = '█' * int(normalized_value * max_bars) + '░' * (max_bars - int(normalized_value * max_bars))
+        
+        output.extend([
+            f"{Colors.CYAN}{emoji} {short_name}: {Colors.BOLD}{value:.6f}{Colors.ENDC}",
+            f"{Colors.YELLOW}├─ {full_name}{Colors.ENDC}",
+            f"{Colors.YELLOW}├─ Initial: {initial_value:.6f}{Colors.ENDC}",
+            f"{Colors.GREEN}└─ Performance: |{bars}| {normalized_value:.1%} improvement{Colors.ENDC}\n"
+        ])
+    
+    # Footer
+    output.extend([
+        f"{Colors.BOLD_BLUE}{'='*60}{Colors.ENDC}",
+        f"{Colors.MAGENTA}Analysis completed successfully! {Colors.STAR}{Colors.ENDC}\n"
+    ])
+    
+    return '\n'.join(output)
 
 def main(mode='both'):
     """
@@ -688,9 +792,8 @@ def main(mode='both'):
                     print(f"No trained model found for {dataset_name} at {model_path}")
                     continue
                     
-                validation_results = trainer.validate(model_path, test_dataloader)
-                print(f"{Colors.CYAN}Validation results for {dataset_name}: {Colors.STAR}{Colors.ENDC}")
-                print(validation_results)
+                validation_results, initial_metrics = trainer.validate(model_path, test_dataloader)
+                print(format_validation_results(validation_results, initial_metrics))
 
         except Exception as e:
             print(f"{Colors.RED}Error in experiment with dataset {dataset_name}: {str(e)} {Colors.CROSS}{Colors.ENDC}")
