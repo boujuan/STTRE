@@ -14,6 +14,7 @@ matplotlib.use('Agg')  # Set non-interactive backend for HPC
 import matplotlib.pyplot as plt
 # import yfinance as yf
 from pathlib import Path
+import seaborn as sns
 
 # Create a directory in the user's home directory
 HOME = str(Path.home())
@@ -468,20 +469,54 @@ class EarlyStopping:
 
 def plot_metrics(train_metrics, val_metrics, metric_names, dataset):
     """Plot training and validation metrics and save to file"""
+    # Set the style
+    sns.set_style("whitegrid")
+    sns.set_context("paper", font_scale=1.5)
+    
+    # Create figure with higher DPI and larger size
     if not hasattr(plot_metrics, 'fig'):
-        plot_metrics.fig, plot_metrics.axes = plt.subplots(1, len(metric_names), figsize=(15, 5))
+        plot_metrics.fig, plot_metrics.axes = plt.subplots(1, len(metric_names), 
+                                                         figsize=(20, 7), 
+                                                         dpi=300)
     
     for i, metric_name in enumerate(metric_names):
         plot_metrics.axes[i].clear()
-        plot_metrics.axes[i].plot(train_metrics[metric_name], label=f'Train {metric_name}')
-        plot_metrics.axes[i].plot(val_metrics[metric_name], label=f'Val {metric_name}')
-        plot_metrics.axes[i].set_title(metric_name)
-        plot_metrics.axes[i].legend()
-        plot_metrics.axes[i].grid(True)
-    
-    plot_metrics.fig.tight_layout()
-    plot_metrics.fig.savefig(os.path.join(PLOT_DIR, f'{dataset}_metrics_latest.png'))
-    # Don't close the figure, reuse it next time
+        
+        # Create DataFrame for seaborn
+        epochs = range(1, len(train_metrics[metric_name]) + 1)
+        train_data = {'Epoch': epochs, 
+                     'Value': train_metrics[metric_name], 
+                     'Type': ['Train'] * len(epochs)}
+        val_data = {'Epoch': epochs, 
+                    'Value': val_metrics[metric_name], 
+                    'Type': ['Validation'] * len(epochs)}
+        
+        # Combine data
+        import pandas as pd
+        df = pd.concat([pd.DataFrame(train_data), pd.DataFrame(val_data)], 
+                      ignore_index=True)
+        
+        # Plot with seaborn
+        sns.lineplot(data=df, x='Epoch', y='Value', hue='Type', 
+                    ax=plot_metrics.axes[i],
+                    palette=['#2ecc71', '#e74c3c'],  # Green for train, red for validation
+                    linewidth=2.5)
+        
+        # Customize the plot
+        plot_metrics.axes[i].set_title(metric_name, pad=20, fontsize=16, fontweight='bold')
+        plot_metrics.axes[i].set_xlabel('Epoch', fontsize=12)
+        plot_metrics.axes[i].set_ylabel(metric_name, fontsize=12)
+        plot_metrics.axes[i].legend(title=None, fontsize=10)
+        
+        # Rotate x-axis labels for better readability
+        plot_metrics.axes[i].tick_params(axis='both', which='major', labelsize=10)
+        
+    # Adjust layout and save
+    plot_metrics.fig.tight_layout(pad=3.0)
+    plot_metrics.fig.savefig(os.path.join(PLOT_DIR, f'{dataset}_metrics_latest.png'), 
+                            bbox_inches='tight',
+                            facecolor='white',
+                            edgecolor='none')
 
 def train_test(embed_size, heads, num_layers, dropout, forward_expansion, lr, batch_size, dir, dataset, NUM_EPOCHS=100, TEST_SPLIT=0.3):
     try:
@@ -575,7 +610,7 @@ def train_test(embed_size, heads, num_layers, dropout, forward_expansion, lr, ba
             'val': {'MSE': [], 'MAE': [], 'MAPE': []}
         }
 
-        # Modify the training loop
+        # Training loop
         for epoch in range(NUM_EPOCHS):
             model.train()
             train_loss = 0
@@ -644,7 +679,6 @@ def train_test(embed_size, heads, num_layers, dropout, forward_expansion, lr, ba
             
             # Logging every 5 epochs
             if epoch % 5 == 0:
-                plot_metrics(history['train'], history['val'], ['MSE', 'MAE', 'MAPE'], dataset)
                 print(f'Epoch {epoch+1}/{NUM_EPOCHS}')
                 print(f'Train Loss: {train_loss:.4f}, MSE: {current_metrics["train"]["mse"]:.4f}, MAE: {current_metrics["train"]["mae"]:.4f}, MAPE: {current_metrics["train"]["mape"]:.4f}')
                 print(f'Val Loss: {val_loss:.4f}, MSE: {current_metrics["val"]["mse"]:.4f}, MAE: {current_metrics["val"]["mae"]:.4f}, MAPE: {current_metrics["val"]["mape"]:.4f}')
@@ -657,6 +691,9 @@ def train_test(embed_size, heads, num_layers, dropout, forward_expansion, lr, ba
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
 
+        # Plot metrics once at the end of training
+        plot_metrics(history['train'], history['val'], ['MSE', 'MAE', 'MAPE'], dataset)
+        
         return history
 
     except Exception as e:
@@ -701,7 +738,7 @@ if __name__ == "__main__":
     dropout = 0.2           # Dropout rate
     lr = 0.0001            # Learning rate
     batch_size = 512       # Batch size
-    NUM_EPOCHS = 100       # Number of epochs
+    NUM_EPOCHS = 1000       # Number of epochs
     TEST_SPLIT = 0.3       # Train/test split ratio
     
     dir = os.path.join(DATA_DIR, 'uber_stock.csv')
