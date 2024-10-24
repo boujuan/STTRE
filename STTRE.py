@@ -1,6 +1,12 @@
 #!/usr/bin/env python
 # coding: utf-8
 
+import warnings
+# import numexpr
+
+# Suppress the pandas warning about numexpr version
+warnings.filterwarnings('ignore', category=UserWarning, module='pandas.core.computation.expressions')
+
 import os
 import numpy as np
 import torch
@@ -15,6 +21,7 @@ import matplotlib.pyplot as plt
 # import yfinance as yf
 from pathlib import Path
 import seaborn as sns
+import polars as pl
 
 # Create a directory in the user's home directory
 HOME = str(Path.home())
@@ -479,27 +486,41 @@ def plot_metrics(train_metrics, val_metrics, metric_names, dataset):
                                                          figsize=(20, 7), 
                                                          dpi=300)
     
+    # Create one combined DataFrame for all metrics
+    all_data = []
+    for metric_name in metric_names:
+        epochs = list(range(1, len(train_metrics[metric_name]) + 1))
+        
+        # Training data
+        all_data.append(pl.DataFrame({
+            'Epoch': epochs,
+            'Value': train_metrics[metric_name],
+            'Type': ['Train'] * len(epochs),
+            'Metric': [metric_name] * len(epochs)
+        }))
+        
+        # Validation data
+        all_data.append(pl.DataFrame({
+            'Epoch': epochs,
+            'Value': val_metrics[metric_name],
+            'Type': ['Validation'] * len(epochs),
+            'Metric': [metric_name] * len(epochs)
+        }))
+    
+    # Combine all data at once
+    df = pl.concat(all_data)
+    
+    # Create plots
     for i, metric_name in enumerate(metric_names):
         plot_metrics.axes[i].clear()
         
-        # Create DataFrame for seaborn
-        epochs = range(1, len(train_metrics[metric_name]) + 1)
-        train_data = {'Epoch': epochs, 
-                     'Value': train_metrics[metric_name], 
-                     'Type': ['Train'] * len(epochs)}
-        val_data = {'Epoch': epochs, 
-                    'Value': val_metrics[metric_name], 
-                    'Type': ['Validation'] * len(epochs)}
-        
-        # Combine data
-        import pandas as pd
-        df = pd.concat([pd.DataFrame(train_data), pd.DataFrame(val_data)], 
-                      ignore_index=True)
+        # Filter data for current metric
+        metric_data = df.filter(pl.col('Metric') == metric_name)
         
         # Plot with seaborn
-        sns.lineplot(data=df, x='Epoch', y='Value', hue='Type', 
+        sns.lineplot(data=metric_data, x='Epoch', y='Value', hue='Type', 
                     ax=plot_metrics.axes[i],
-                    palette=['#2ecc71', '#e74c3c'],  # Green for train, red for validation
+                    palette=['#2ecc71', '#e74c3c'],
                     linewidth=2.5)
         
         # Customize the plot
@@ -507,10 +528,8 @@ def plot_metrics(train_metrics, val_metrics, metric_names, dataset):
         plot_metrics.axes[i].set_xlabel('Epoch', fontsize=12)
         plot_metrics.axes[i].set_ylabel(metric_name, fontsize=12)
         plot_metrics.axes[i].legend(title=None, fontsize=10)
-        
-        # Rotate x-axis labels for better readability
         plot_metrics.axes[i].tick_params(axis='both', which='major', labelsize=10)
-        
+    
     # Adjust layout and save
     plot_metrics.fig.tight_layout(pad=3.0)
     plot_metrics.fig.savefig(os.path.join(PLOT_DIR, f'{dataset}_metrics_latest.png'), 
@@ -554,7 +573,7 @@ def train_test(embed_size, heads, num_layers, dropout, forward_expansion, lr, ba
             train_data, 
             batch_size=batch_size,
             sampler=train_sampler,
-            num_workers=2,  # Reduce from 4 to 2 or 0
+            num_workers=2,
             pin_memory=True,
             persistent_workers=True  # Add this to prevent worker reinitialization
         )
@@ -562,7 +581,7 @@ def train_test(embed_size, heads, num_layers, dropout, forward_expansion, lr, ba
             train_data, 
             batch_size=batch_size,
             sampler=test_sampler,
-            num_workers=2,  # Reduce from 4 to 2 or 0
+            num_workers=2,
             pin_memory=True,
             persistent_workers=True  # Add this to prevent worker reinitialization
         )
