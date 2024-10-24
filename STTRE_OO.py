@@ -40,6 +40,18 @@ class Colors:
     # End color
     ENDC = '\033[0m'
     
+    # Emojis
+    ROCKET = '🚀'
+    HOURGLASS = '⌛'
+    CHECK = '✅'
+    CROSS = '❌'
+    FIRE = '🔥'
+    CHART = '📊'
+    WARNING = '⚠️'
+    BRAIN = '🧠'
+    SAVE = '💾'
+    STAR = '⭐'
+    
     @classmethod
     def disable_colors(cls):
         """Disable colors if terminal doesn't support them"""
@@ -347,13 +359,14 @@ class EarlyStopping:
         elif val_loss > self.best_loss + self.min_delta:
             self.counter += 1
             if self.verbose:
-                print(f'{Colors.BOLD_GREEN}Epoch {self.current_epoch}:{Colors.ENDC}{Colors.RED} Validation loss increased ({self.best_loss:.6f} --> {val_loss:.6f}){Colors.ENDC}')
-                print(f'{Colors.RED}EarlyStopping counter: {self.counter} out of {self.patience}{Colors.ENDC}')
+                print(f'{Colors.RED}Epoch {self.current_epoch}: Validation loss increased ({self.best_loss:.6f} --> {val_loss:.6f}) {Colors.CROSS}{Colors.ENDC}')
+                print(f'{Colors.RED}EarlyStopping counter: {self.counter} out of {self.patience} {Colors.WARNING}{Colors.ENDC}')
             if self.counter >= self.patience:
                 self.early_stop = True
         else:
             if self.verbose and (self.best_loss - val_loss) > self.min_delta:
-                print(f'{Colors.BOLD_GREEN}Epoch {self.current_epoch}:{Colors.ENDC}{Colors.BLUE} Validation loss decreased ({self.best_loss:.6f} --> {val_loss:.6f}){Colors.ENDC}')
+                print(f'{Colors.BLUE}Epoch {self.current_epoch}: Validation loss decreased ({self.best_loss:.6f} --> {val_loss:.6f}) {Colors.FIRE}{Colors.ENDC}')
+                print(f'{Colors.BLUE}Saving model... {Colors.SAVE}{Colors.ENDC}')
             self.best_loss = val_loss
             self.save_checkpoint(val_loss, model, path)
             self.counter = 0
@@ -560,15 +573,15 @@ class STTRETrainer:
             early_stopping(val_loss, model, f'best_model_{dataset_name}.pth', epoch + 1)
             
             if epoch % 5 == 0:
-                # print(f'{Colors.BOLD_BLUE}Epoch {epoch+1}/{self.train_params["NUM_EPOCHS"]}{Colors.ENDC}')
+                print(f'{Colors.BOLD_BLUE}Epoch {epoch+1}/{self.train_params["NUM_EPOCHS"]} {Colors.HOURGLASS}{Colors.ENDC}')
                 print(f'{Colors.CYAN}Train Loss: {train_loss:.4f}, '
                       f'MSE: {current_metrics["train"]["mse"]:.4f}, '
                       f'MAE: {current_metrics["train"]["mae"]:.4f}, '
-                      f'MAPE: {current_metrics["train"]["mape"]:.4f}{Colors.ENDC}')
+                      f'MAPE: {current_metrics["train"]["mape"]:.4f} {Colors.CHART}{Colors.ENDC}')
                 print(f'{Colors.YELLOW}Val Loss: {val_loss:.4f}, '
                       f'MSE: {current_metrics["val"]["mse"]:.4f}, '
                       f'MAE: {current_metrics["val"]["mae"]:.4f}, '
-                      f'MAPE: {current_metrics["val"]["mape"]:.4f}{Colors.ENDC}')
+                      f'MAPE: {current_metrics["val"]["mape"]:.4f} {Colors.BRAIN}{Colors.ENDC}')
 
             if early_stopping.early_stop:
                 print(f"Early stopping triggered after {epoch+1} epochs")
@@ -650,7 +663,7 @@ def main(mode='both'):
     }
 
     for dataset_name, (dataset_class, data_path) in datasets.items():
-        print(f"\n{Colors.BOLD_GREEN}Processing {dataset_name} dataset{Colors.ENDC}")
+        print(f"\n{Colors.BOLD_GREEN}Processing {dataset_name} dataset {Colors.ROCKET}{Colors.ENDC}")
         train_dataloader, test_dataloader = trainer.prepare_data(dataset_class, data_path)
         
         if train_dataloader is None or test_dataloader is None:
@@ -663,28 +676,28 @@ def main(mode='both'):
 
             # Training phase
             if mode in ['train', 'both']:
-                print(f"{Colors.MAGENTA}Training {dataset_name}...{Colors.ENDC}")
+                print(f"{Colors.MAGENTA}Training {dataset_name}... {Colors.BRAIN}{Colors.ENDC}")
                 history = trainer.train(train_dataloader, test_dataloader, dataset_name)
-                print(f"{Colors.BOLD_GREEN}Completed training on {dataset_name} dataset{Colors.ENDC}")
+                print(f"{Colors.BOLD_GREEN}Completed training on {dataset_name} dataset {Colors.CHECK}{Colors.ENDC}")
 
             # Validation phase
             if mode in ['validate', 'both']:
-                print(f"{Colors.MAGENTA}Validating {dataset_name}...{Colors.ENDC}")
+                print(f"{Colors.MAGENTA}Validating {dataset_name}... {Colors.CHART}{Colors.ENDC}")
                 model_path = os.path.join(Config.MODEL_DIR, f'best_model_{dataset_name}.pth')
                 if not os.path.exists(model_path):
                     print(f"No trained model found for {dataset_name} at {model_path}")
                     continue
                     
                 validation_results = trainer.validate(model_path, test_dataloader)
-                print(f"{Colors.CYAN}Validation results for {dataset_name}:{Colors.ENDC}")
+                print(f"{Colors.CYAN}Validation results for {dataset_name}: {Colors.STAR}{Colors.ENDC}")
                 print(validation_results)
 
         except Exception as e:
-            print(f"{Colors.RED}Error in experiment with dataset {dataset_name}: {str(e)}{Colors.ENDC}")
+            print(f"{Colors.RED}Error in experiment with dataset {dataset_name}: {str(e)} {Colors.CROSS}{Colors.ENDC}")
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
 
-    print(f"\n{Colors.BOLD_GREEN}All experiments completed!{Colors.ENDC}")
+    print(f"\n{Colors.BOLD_GREEN}All experiments completed! {Colors.CHECK}{Colors.ENDC}")
 
 if __name__ == "__main__":
     # You can change this to 'train', 'validate', or 'both'
