@@ -468,19 +468,20 @@ class EarlyStopping:
 
 def plot_metrics(train_metrics, val_metrics, metric_names, dataset):
     """Plot training and validation metrics and save to file"""
-    plt.figure(figsize=(15, 5))
-    fig, axes = plt.subplots(1, len(metric_names), figsize=(15, 5))
+    if not hasattr(plot_metrics, 'fig'):
+        plot_metrics.fig, plot_metrics.axes = plt.subplots(1, len(metric_names), figsize=(15, 5))
     
     for i, metric_name in enumerate(metric_names):
-        axes[i].plot(train_metrics[metric_name], label=f'Train {metric_name}')
-        axes[i].plot(val_metrics[metric_name], label=f'Val {metric_name}')
-        axes[i].set_title(metric_name)
-        axes[i].legend()
-        axes[i].grid(True)
+        plot_metrics.axes[i].clear()
+        plot_metrics.axes[i].plot(train_metrics[metric_name], label=f'Train {metric_name}')
+        plot_metrics.axes[i].plot(val_metrics[metric_name], label=f'Val {metric_name}')
+        plot_metrics.axes[i].set_title(metric_name)
+        plot_metrics.axes[i].legend()
+        plot_metrics.axes[i].grid(True)
     
-    plt.tight_layout()
-    plt.savefig(os.path.join(PLOT_DIR, f'{dataset}_metrics_{len(train_metrics["MSE"])}.png'))
-    plt.close('all')  # Close all figures to prevent memory leak
+    plot_metrics.fig.tight_layout()
+    plot_metrics.fig.savefig(os.path.join(PLOT_DIR, f'{dataset}_metrics_latest.png'))
+    # Don't close the figure, reuse it next time
 
 def train_test(embed_size, heads, num_layers, dropout, forward_expansion, lr, batch_size, dir, dataset, NUM_EPOCHS=100, TEST_SPLIT=0.3):
     try:
@@ -518,15 +519,17 @@ def train_test(embed_size, heads, num_layers, dropout, forward_expansion, lr, ba
             train_data, 
             batch_size=batch_size,
             sampler=train_sampler,
-            num_workers=4,
-            pin_memory=True
+            num_workers=2,  # Reduce from 4 to 2 or 0
+            pin_memory=True,
+            persistent_workers=True  # Add this to prevent worker reinitialization
         )
         test_dataloader = DataLoader(
             train_data, 
             batch_size=batch_size,
             sampler=test_sampler,
-            num_workers=4,
-            pin_memory=True
+            num_workers=2,  # Reduce from 4 to 2 or 0
+            pin_memory=True,
+            persistent_workers=True  # Add this to prevent worker reinitialization
         )
 
         # Initialize metrics on device
@@ -560,7 +563,7 @@ def train_test(embed_size, heads, num_layers, dropout, forward_expansion, lr, ba
             optimizer, 
             mode='min', 
             factor=0.5, 
-            patience=5, 
+            patience=10,  # Increase patience
             verbose=True
         )
         loss_fn = nn.MSELoss()
@@ -573,12 +576,14 @@ def train_test(embed_size, heads, num_layers, dropout, forward_expansion, lr, ba
             'val': {'MSE': [], 'MAE': [], 'MAPE': []}
         }
 
+        # Modify the training loop to compute metrics less frequently
         for epoch in range(NUM_EPOCHS):
             # Training phase
             model.train()
+            epoch_loss = 0
             for inputs, labels in train_dataloader:
                 inputs, labels = inputs.to(device), labels.to(device)
-                optimizer.zero_grad(set_to_none=True)  # More efficient than zero_grad()
+                optimizer.zero_grad(set_to_none=True)
                 
                 outputs = model(inputs, dropout)
                 loss = loss_fn(outputs, labels)
@@ -586,22 +591,27 @@ def train_test(embed_size, heads, num_layers, dropout, forward_expansion, lr, ba
                 
                 # Gradient clipping
                 torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-                
                 optimizer.step()
                 
-                # Update metrics
-                for metric in metrics['train'].values():
-                    metric.update(outputs, labels)
+                # Update metrics only if we're going to log this epoch
+                if epoch % 5 == 0:
+                    for metric in metrics['train'].values():
+                        metric.update(outputs, labels)
+                
+                epoch_loss += loss.item()
 
             # Validation phase
-            model.eval()
-            with torch.no_grad():
-                for inputs, labels in test_dataloader:
-                    inputs, labels = inputs.to(device), labels.to(device)
-                    outputs = model(inputs, 0)
-                    
-                    for metric in metrics['val'].values():
-                        metric.update(outputs, labels)
+            if epoch % 5 == 0:  # Only compute validation metrics every 5 epochs
+                model.eval()
+                val_loss = 0
+                with torch.no_grad():
+                    for inputs, labels in test_dataloader:
+                        inputs, labels = inputs.to(device), labels.to(device)
+                        outputs = model(inputs, 0)
+                        val_loss += loss_fn(outputs, labels).item()
+                        
+                        for metric in metrics['val'].values():
+                            metric.update(outputs, labels)
 
             # Compute and store metrics
             current_metrics = {
@@ -676,7 +686,7 @@ if __name__ == "__main__":
     # Training Parameters
     dropout = 0.2           # Dropout rate
     lr = 0.0001            # Learning rate
-    batch_size = 256       # Batch size
+    batch_size = 512       # Batch size
     NUM_EPOCHS = 100       # Number of epochs
     TEST_SPLIT = 0.3       # Train/test split ratio
     
@@ -707,4 +717,3 @@ if __name__ == "__main__":
             torch.cuda.empty_cache()
 
     print("\nAll experiments completed!")
-
