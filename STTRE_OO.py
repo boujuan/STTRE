@@ -1,6 +1,11 @@
 #!/usr/bin/env python
 # coding: utf-8
 
+# TODO:
+# - Add my dataset
+# - Add decoder
+# - Add parallelization
+
 import warnings
 import os
 import numpy as np
@@ -850,8 +855,8 @@ def main(mode='both'):
     trainer = STTRETrainer(model_params, train_params)
 
     datasets = {
-        # 'Uber': (Uber, os.path.join(Config.DATA_DIR, 'uber_stock.csv')),
-        'AirQuality': (AirQuality, None),
+        'Uber': (Uber, os.path.join(Config.DATA_DIR, 'uber_stock.csv')),
+        # 'AirQuality': (AirQuality, None),
         # 'IstanbulStock': (IstanbulStock, os.path.join(Config.DATA_DIR, 'istanbul_stock.csv')),
         # 'Traffic': (Traffic, os.path.join(Config.DATA_DIR, 'traffic.csv')),
         # 'AppliancesEnergy1': (AppliancesEnergy1, os.path.join(Config.DATA_DIR, 'appliances_energy1.csv')),
