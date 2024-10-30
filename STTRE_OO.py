@@ -4,7 +4,9 @@
 # TODO:
 # - Add my dataset
 # - Add decoder
-# - Add parallelization
+# - Add parallelization (DistributedDataParallel)
+# - Add dataloader for multiple datasets
+# - Add automatic hyperparameter tuning (Population Based Training)
 
 import warnings
 import os
