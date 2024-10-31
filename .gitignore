@@ -1,1 +1,7 @@
 *.code-workspace
+__pycache__
+*.log
+*.out
+*.err
+.vscode
+_Old
