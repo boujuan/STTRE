@@ -2,6 +2,7 @@ import lightning as L
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+
 from .encoder import Encoder
 
 class STTRE(L.LightningModule):

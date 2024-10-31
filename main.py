@@ -4,7 +4,7 @@ from .train import train_sttre
 if __name__ == "__main__":
     # Configuration
     config = Namespace(
-        data_dir='path/to/your/data.csv',
+        data_dir='~/STTRE_outputs/data/uber_stock.csv',
         seq_len=60,
         columns=[0, 1, 2, 3, 4],  # Adjust based on your data
         batch_size=32,
