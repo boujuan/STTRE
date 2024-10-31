@@ -1,12 +1,12 @@
 from argparse import Namespace
-from .train import train_sttre
+from STTRE import train_sttre
 
-if __name__ == "__main__":
+def main():
     # Configuration
     config = Namespace(
         data_dir='~/STTRE_outputs/data/uber_stock.csv',
         seq_len=60,
-        columns=[0, 1, 2, 3, 4],  # Adjust based on your data
+        columns=[0, 1, 2, 3, 4],  # Adjust based on your data columns
         batch_size=32,
         input_shape=(32, 5, 60),  # (batch_size, num_variables, sequence_length)
         output_size=1,
@@ -19,4 +19,7 @@ if __name__ == "__main__":
     )
     
     # Train model
-    train_sttre(config) 
+    train_sttre(config)
+
+if __name__ == "__main__":
+    main() 
