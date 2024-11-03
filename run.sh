@@ -6,4 +6,4 @@ mamba activate sttre
 export OMP_NUM_THREADS=8
 
 # Run with 4 GPUs
-torchrun --nproc_per_node=4 ~/STTRE/_Old/STTRE_PL.py
+torchrun --nproc_per_node=4 ~/STTRE/STTRE_PL.py
