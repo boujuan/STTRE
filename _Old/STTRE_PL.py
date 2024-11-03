@@ -803,19 +803,18 @@ def train_sttre(dataset_class, data_path, model_params, train_params):
                 logger=logger,
                 enable_progress_bar=True
             )
-            test_results = test_trainer.test(model, data_module)
+            test_results = test_trainer.test(model, datamodule=data_module)
             print(f"{Colors.BOLD_GREEN}Testing completed! {Colors.CHECK}{Colors.ENDC}")
         
         # Ensure all processes are synchronized before returning
         if train_trainer.world_size > 1:
             torch.distributed.barrier()
             
-        return model, train_trainer, test_results
+        return model, train_trainer, test_results if test_results is not None else []
 
     except Exception as e:
         if train_trainer.global_rank == 0:
             print(f"{Colors.RED}Error during training: {str(e)} {Colors.CROSS}{Colors.ENDC}")
-        # Clean up distributed processes
         if train_trainer.world_size > 1:
             torch.distributed.destroy_process_group()
         raise
