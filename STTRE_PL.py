@@ -612,7 +612,7 @@ class LitSTTRE(L.LightningModule):
         y_hat = self(x)
         test_loss = F.mse_loss(y_hat, y)
         
-        # Log with sync_dist=True
+        # Add sync_dist=True to ensure proper metric synchronization across devices
         self.log('test_loss', test_loss, sync_dist=True)
         self.log('test_mse', self.test_mse(y_hat, y), sync_dist=True)
         self.log('test_mae', self.test_mae(y_hat, y), sync_dist=True)
