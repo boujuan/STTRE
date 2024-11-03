@@ -587,6 +587,13 @@ class LitSTTRE(L.LightningModule):
         return val_loss
 
     def test_step(self, batch, batch_idx):
+        if not hasattr(self, 'test_metrics_initialized'):
+            # Initialize test metrics only once
+            self.test_mse = MeanSquaredError().to(self.device)
+            self.test_mae = MeanAbsoluteError().to(self.device)
+            self.test_mape = MeanAbsolutePercentageError().to(self.device)
+            self.test_metrics_initialized = True
+        
         x, y = batch
         y_hat = self(x)
         test_loss = F.mse_loss(y_hat, y)
@@ -596,7 +603,7 @@ class LitSTTRE(L.LightningModule):
         self.test_mae(y_hat, y)
         self.test_mape(y_hat, y)
         
-        # Log metrics with sync_dist=True
+        # Log metrics
         self.log('test_loss', test_loss, on_step=False, on_epoch=True, sync_dist=True)
         self.log('test_mse', self.test_mse, on_step=False, on_epoch=True, sync_dist=True)
         self.log('test_mae', self.test_mae, on_step=False, on_epoch=True, sync_dist=True)
@@ -789,12 +796,13 @@ def train_sttre(dataset_class, data_path, model_params, train_params):
             devices=[0],
             logger=logger,
             enable_progress_bar=True,
-            strategy='auto'
+            strategy='auto'  # Changed from None to 'auto'
         )
         
-        # Ensure model is on the correct device before testing
+        # Move model to CPU first to avoid device conflicts
+        model = model.cpu()
         model = model.to('cuda:0')
-        test_results = test_trainer.test(model, datamodule=data_module)
+        test_results = test_trainer.test(model, datamodule=data_module, verbose=True)
         print(f"{Colors.BOLD_GREEN}Testing completed! {Colors.CHECK}{Colors.ENDC}")
 
         return model, train_trainer, test_results
