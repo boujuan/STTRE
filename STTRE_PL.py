@@ -5,10 +5,12 @@
 # - Turn into pytorch lightning for easier parallelization ✅
 # - Add parallelization (DistributedDataParallel) ✅
 # - Use better logging (wandb/neptune/comet/clearml/mlflow) ✅
+# - Try other datasets from original paper
 # - Add my dataset
 # - Add automatic hyperparameter tuning (Population Based Training)
 # - Add decoder
 # - Add dataloader for multiple datasets
+# - Reformat entire codebase into separate files (_init_.py, data.py, dataset.py, model.py, train.py, encoder.py, decoder.py, main.py...)
 # - Enable colorful/rich terminal output + Emojis
 
 import warnings
