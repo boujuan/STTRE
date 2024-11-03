@@ -3,9 +3,9 @@
 
 # TODO:
 # - Add my dataset
-# - Turn into pytorch lightning for easier parallelization
+# - Turn into pytorch lightning for easier parallelization ✅
 # - Add decoder
-# - Add parallelization (DistributedDataParallel)
+# - Add parallelization (DistributedDataParallel) ✅
 # - Add dataloader for multiple datasets
 # - Add automatic hyperparameter tuning (Population Based Training)
 
@@ -503,9 +503,6 @@ class LitSTTRE(L.LightningModule):
         self.test_mae = None
         self.test_mape = None
         
-        # Add this to control progress bar behavior
-        self.log_dict = {}
-        
     def forward(self, x):
         batch_size = len(x)
         
@@ -553,7 +550,7 @@ class LitSTTRE(L.LightningModule):
         self.training_history['train']['MAE'].append(self.train_mae.compute().item())
         self.training_history['train']['MAPE'].append(self.train_mape.compute().item())
         
-        # Log metrics individually (not using log_dict)
+        # Log metrics with sync_dist=True
         self.log('train_loss', loss, prog_bar=True, sync_dist=True)
         self.log('train_mse', self.train_mse, prog_bar=True, sync_dist=True)
         self.log('train_mae', self.train_mae, prog_bar=True, sync_dist=True)
@@ -594,15 +591,16 @@ class LitSTTRE(L.LightningModule):
         y_hat = self(x)
         test_loss = F.mse_loss(y_hat, y)
         
-        # Update and log metrics with sync_dist=True
+        # Update metrics
         self.test_mse(y_hat, y)
         self.test_mae(y_hat, y)
         self.test_mape(y_hat, y)
         
-        self.log('test_loss', test_loss, prog_bar=True, sync_dist=True, on_epoch=True)
-        self.log('test_mse', self.test_mse, prog_bar=True, sync_dist=True, on_epoch=True)
-        self.log('test_mae', self.test_mae, prog_bar=True, sync_dist=True, on_epoch=True)
-        self.log('test_mape', self.test_mape, prog_bar=True, sync_dist=True, on_epoch=True)
+        # Log metrics with sync_dist=True
+        self.log('test_loss', test_loss, on_step=False, on_epoch=True, sync_dist=True)
+        self.log('test_mse', self.test_mse, on_step=False, on_epoch=True, sync_dist=True)
+        self.log('test_mae', self.test_mae, on_step=False, on_epoch=True, sync_dist=True)
+        self.log('test_mape', self.test_mape, on_step=False, on_epoch=True, sync_dist=True)
         
         return test_loss
 
@@ -779,44 +777,30 @@ def train_sttre(dataset_class, data_path, model_params, train_params):
     )
 
     try:
-        # Only print from rank 0 (main process)
-        if train_trainer.global_rank == 0:
-            print(f"\n{Colors.BOLD_GREEN}Starting training for {dataset_class.__name__} dataset {Colors.ROCKET}{Colors.ENDC}")
-        
+        # Training phase
+        print(f"\n{Colors.BOLD_GREEN}Starting training for {dataset_class.__name__} dataset {Colors.ROCKET}{Colors.ENDC}")
         train_trainer.fit(model, data_module)
+        print(f"{Colors.BOLD_GREEN}Training completed! {Colors.CHECK}{Colors.ENDC}")
+
+        # Testing phase with single GPU
+        print(f"\n{Colors.BOLD_BLUE}Starting testing... {Colors.CHART}{Colors.ENDC}")
+        test_trainer = L.Trainer(
+            accelerator='gpu',
+            devices=[0],
+            logger=logger,
+            enable_progress_bar=True,
+            strategy='auto'
+        )
         
-        if train_trainer.global_rank == 0:
-            print(f"{Colors.BOLD_GREEN}Training completed! {Colors.CHECK}{Colors.ENDC}")
-            print(f"\n{Colors.BOLD_BLUE}Starting testing... {Colors.CHART}{Colors.ENDC}")
-        
-        # Ensure all processes are synchronized before testing
-        if train_trainer.world_size > 1:
-            torch.distributed.barrier()
-        
-        # Only run testing on rank 0
-        test_results = None
-        if train_trainer.global_rank == 0:
-            test_trainer = L.Trainer(
-                accelerator='auto',
-                devices=1,
-                num_nodes=1,
-                logger=logger,
-                enable_progress_bar=True
-            )
-            test_results = test_trainer.test(model, datamodule=data_module)
-            print(f"{Colors.BOLD_GREEN}Testing completed! {Colors.CHECK}{Colors.ENDC}")
-        
-        # Ensure all processes are synchronized before returning
-        if train_trainer.world_size > 1:
-            torch.distributed.barrier()
-            
-        return model, train_trainer, test_results if test_results is not None else []
+        # Ensure model is on the correct device before testing
+        model = model.to('cuda:0')
+        test_results = test_trainer.test(model, datamodule=data_module)
+        print(f"{Colors.BOLD_GREEN}Testing completed! {Colors.CHECK}{Colors.ENDC}")
+
+        return model, train_trainer, test_results
 
     except Exception as e:
-        if train_trainer.global_rank == 0:
-            print(f"{Colors.RED}Error during training: {str(e)} {Colors.CROSS}{Colors.ENDC}")
-        if train_trainer.world_size > 1:
-            torch.distributed.destroy_process_group()
+        print(f"{Colors.RED}Error during training: {str(e)} {Colors.CROSS}{Colors.ENDC}")
         raise
 
     finally:
@@ -860,17 +844,10 @@ if __name__ == "__main__":
     for dataset_name, (dataset_class, data_path) in datasets.items():
         try:
             model, trainer, test_results = train_sttre(dataset_class, data_path, model_params, train_params)
+            print(f"{Colors.BOLD_GREEN}Completed {dataset_name} dataset {Colors.CHECK}{Colors.ENDC}")
+            
         except Exception as e:
-            if not hasattr(trainer, 'global_rank') or trainer.global_rank == 0:
-                print(f"{Colors.RED}Error processing {dataset_name}: {str(e)} {Colors.CROSS}{Colors.ENDC}")
+            print(f"{Colors.RED}Error processing {dataset_name}: {str(e)} {Colors.CROSS}{Colors.ENDC}")
             continue
-        finally:
-            # Ensure cleanup happens even if there's an error
-            if trainer and hasattr(trainer, 'world_size') and trainer.world_size > 1:
-                try:
-                    torch.distributed.destroy_process_group()
-                except:
-                    pass
 
-    if not hasattr(trainer, 'global_rank') or trainer.global_rank == 0:
-        print(f"\n{Colors.BOLD_GREEN}All experiments completed! {Colors.CHECK}{Colors.ENDC}")
+    print(f"\n{Colors.BOLD_GREEN}All experiments completed! {Colors.CHECK}{Colors.ENDC}")
