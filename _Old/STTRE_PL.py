@@ -30,6 +30,8 @@ from torchmetrics import MeanSquaredError, MeanAbsolutePercentageError, MeanAbso
 
 warnings.filterwarnings('ignore', category=UserWarning, module='pandas.core.computation.expressions')
 
+torch.set_float32_matmul_precision('medium')
+
 class Colors:
     # Regular colors
     BLUE = '\033[94m'      # Light/Bright Blue
@@ -121,50 +123,68 @@ class Plotter:
         
         if not hasattr(Plotter.plot_metrics, 'fig'):
             Plotter.plot_metrics.fig, Plotter.plot_metrics.axes = plt.subplots(1, len(metric_names), 
-                                                                               figsize=(20, 7), 
-                                                                               dpi=300)
+                                                                             figsize=(20, 7), 
+                                                                             dpi=300)
         
         all_data = []
         for metric_name in metric_names:
-            epochs = list(range(1, len(train_metrics[metric_name]) + 1))
+            # Ensure train and val metrics have the same length
+            min_len = min(len(train_metrics[metric_name]), len(val_metrics[metric_name]))
+            epochs = list(range(1, min_len + 1))
             
-            all_data.append(pl.DataFrame({
+            # Truncate metrics to the same length
+            train_values = train_metrics[metric_name][:min_len]
+            val_values = val_metrics[metric_name][:min_len]
+            
+            train_df = pl.DataFrame({
                 'Epoch': epochs,
-                'Value': train_metrics[metric_name],
-                'Type': ['Train'] * len(epochs),
-                'Metric': [metric_name] * len(epochs)
-            }))
+                'Value': train_values,
+                'Type': ['Train'] * min_len,
+                'Metric': [metric_name] * min_len
+            })
             
-            all_data.append(pl.DataFrame({
+            val_df = pl.DataFrame({
                 'Epoch': epochs,
-                'Value': val_metrics[metric_name],
-                'Type': ['Validation'] * len(epochs),
-                'Metric': [metric_name] * len(epochs)
-            }))
-        
-        df = pl.concat(all_data)
-        
-        for i, metric_name in enumerate(metric_names):
-            Plotter.plot_metrics.axes[i].clear()
+                'Value': val_values,
+                'Type': ['Validation'] * min_len,
+                'Metric': [metric_name] * min_len
+            })
             
-            metric_data = df.filter(pl.col('Metric') == metric_name)
-            
-            sns.lineplot(data=metric_data, x='Epoch', y='Value', hue='Type', 
-                        ax=Plotter.plot_metrics.axes[i],
-                        palette=['#2ecc71', '#e74c3c'],
-                        linewidth=2.5)
-            
-            Plotter.plot_metrics.axes[i].set_title(metric_name, pad=20, fontsize=16, fontweight='bold')
-            Plotter.plot_metrics.axes[i].set_xlabel('Epoch', fontsize=12)
-            Plotter.plot_metrics.axes[i].set_ylabel(metric_name, fontsize=12)
-            Plotter.plot_metrics.axes[i].legend(title=None, fontsize=10)
-            Plotter.plot_metrics.axes[i].tick_params(axis='both', which='major', labelsize=10)
+            all_data.extend([train_df, val_df])
         
-        Plotter.plot_metrics.fig.tight_layout(pad=3.0)
-        Plotter.plot_metrics.fig.savefig(os.path.join(Config.PLOT_DIR, f'{dataset}_metrics_latest.png'), 
-                                        bbox_inches='tight',
-                                        facecolor='white',
-                                        edgecolor='none')
+        try:
+            df = pl.concat(all_data)
+            
+            for i, metric_name in enumerate(metric_names):
+                ax = Plotter.plot_metrics.axes[i] if len(metric_names) > 1 else Plotter.plot_metrics.axes
+                ax.clear()
+                
+                metric_data = df.filter(pl.col('Metric') == metric_name)
+                
+                # Convert to pandas for seaborn compatibility
+                metric_data_pd = metric_data.to_pandas()
+                
+                sns.lineplot(data=metric_data_pd, x='Epoch', y='Value', hue='Type', 
+                           ax=ax,
+                           palette=['#2ecc71', '#e74c3c'],
+                           linewidth=2.5)
+                
+                ax.set_title(metric_name, pad=20, fontsize=16, fontweight='bold')
+                ax.set_xlabel('Epoch', fontsize=12)
+                ax.set_ylabel(metric_name, fontsize=12)
+                ax.legend(title=None, fontsize=10)
+                ax.tick_params(axis='both', which='major', labelsize=10)
+            
+            Plotter.plot_metrics.fig.tight_layout(pad=3.0)
+            Plotter.plot_metrics.fig.savefig(os.path.join(Config.PLOT_DIR, f'{dataset}_metrics_latest.png'), 
+                                           bbox_inches='tight',
+                                           facecolor='white',
+                                           edgecolor='none')
+            
+        except Exception as e:
+            print(f"Error in plotting: {str(e)}")
+            # Don't let plotting errors stop the training process
+            pass
 
 class BaseDataset(Dataset):
     def __init__(self, dir, seq_len, columns):
@@ -274,13 +294,14 @@ class AppliancesEnergy2(BaseDataset):
         super().__init__(dir, seq_len, columns=range(26))
 
 class SelfAttention(nn.Module):
-    def __init__(self, embed_size, heads, seq_len, module, rel_emb):
+    def __init__(self, embed_size, heads, seq_len, module, rel_emb, device):
         super(SelfAttention, self).__init__()
         self.embed_size = embed_size
         self.heads = heads
         self.seq_len = seq_len
         self.module = module
         self.rel_emb = rel_emb
+        self.device = device
         modules = ['spatial', 'temporal', 'spatiotemporal', 'output']
         assert (module in modules), "Invalid module"
 
@@ -291,7 +312,7 @@ class SelfAttention(nn.Module):
             self.queries = nn.Linear(self.embed_size, self.embed_size, dtype=torch.float32)
 
             if rel_emb:
-                self.E = nn.Parameter(torch.randn([self.heads, self.head_dim, self.embed_size]))
+                self.E = nn.Parameter(torch.randn([self.heads, self.head_dim, self.embed_size]).to(self.device))
         else:
             self.head_dim = embed_size // heads
             assert (self.head_dim * heads == embed_size), "Embed size not div by heads"
@@ -300,7 +321,7 @@ class SelfAttention(nn.Module):
             self.queries = nn.Linear(self.head_dim, self.head_dim, dtype=torch.float32)
 
             if rel_emb:
-                self.E = nn.Parameter(torch.randn([1, self.seq_len, self.head_dim]))
+                self.E = nn.Parameter(torch.randn([1, self.seq_len, self.head_dim]).to(self.device))
 
         self.fc_out = nn.Linear(self.embed_size, self.embed_size)
 
@@ -328,13 +349,13 @@ class SelfAttention(nn.Module):
             QE = self._mask_positions(QE)
             S = self._skew(QE).contiguous().view(N, self.heads, self.seq_len, self.seq_len)
             qk = torch.einsum("nqhd,nkhd->nhqk", [queries, keys])
-            mask = torch.triu(torch.ones(1, self.seq_len, self.seq_len), 1)
+            mask = torch.triu(torch.ones(1, self.seq_len, self.seq_len, device=x.device), 1)
             if mask is not None:
                 qk = qk.masked_fill(mask == 0, float("-1e20"))
             attention = torch.softmax(qk / (self.embed_size ** (1/2)), dim=3) + S
         else:
             qk = torch.einsum("nqhd,nkhd->nhqk", [queries, keys])
-            mask = torch.triu(torch.ones(1, self.seq_len, self.seq_len), 1)
+            mask = torch.triu(torch.ones(1, self.seq_len, self.seq_len, device=x.device), 1)
             if mask is not None:
                 qk = qk.masked_fill(mask == 0, float("-1e20"))
             attention = torch.softmax(qk / (self.embed_size ** (1/2)), dim=3)
@@ -349,7 +370,7 @@ class SelfAttention(nn.Module):
 
     def _mask_positions(self, qe):
         L = qe.shape[-1]
-        mask = torch.triu(torch.ones(L, L), 1).flip(1)
+        mask = torch.triu(torch.ones(L, L, device=qe.device), 1).flip(1)
         return qe.masked_fill((mask == 1), 0)
 
     def _skew(self, qe):
@@ -359,9 +380,9 @@ class SelfAttention(nn.Module):
         return padded_qe[:,:,1:,:]
 
 class TransformerBlock(nn.Module):
-    def __init__(self, embed_size, heads, seq_len, module, forward_expansion, rel_emb):
+    def __init__(self, embed_size, heads, seq_len, module, forward_expansion, rel_emb, device):
         super(TransformerBlock, self).__init__()
-        self.attention = SelfAttention(embed_size, heads, seq_len, module, rel_emb=rel_emb)
+        self.attention = SelfAttention(embed_size, heads, seq_len, module, rel_emb=rel_emb, device=device)
 
         if module in ['spatial', 'temporal']:
             self.norm1 = nn.BatchNorm1d(seq_len*heads)
@@ -393,7 +414,7 @@ class Encoder(nn.Module):
         self.fc_out = nn.Linear(embed_size, embed_size)
 
         self.layers = nn.ModuleList(
-            [TransformerBlock(embed_size, heads, seq_len, module, forward_expansion=forward_expansion, rel_emb=rel_emb)
+            [TransformerBlock(embed_size, heads, seq_len, module, forward_expansion=forward_expansion, rel_emb=rel_emb, device=device)
              for _ in range(num_layers)]
         )
 
@@ -474,6 +495,11 @@ class LitSTTRE(L.LightningModule):
             'val': {'MSE': [], 'MAE': [], 'MAPE': []}
         }
         
+        # Initialize test metrics
+        self.test_mse = None
+        self.test_mae = None
+        self.test_mape = None
+        
     def forward(self, x):
         batch_size = len(x)
         
@@ -521,11 +547,11 @@ class LitSTTRE(L.LightningModule):
         self.training_history['train']['MAE'].append(self.train_mae.compute().item())
         self.training_history['train']['MAPE'].append(self.train_mape.compute().item())
         
-        # Log metrics
-        self.log('train_loss', loss, prog_bar=True)
-        self.log('train_mse', self.train_mse, prog_bar=True)
-        self.log('train_mae', self.train_mae, prog_bar=True)
-        self.log('train_mape', self.train_mape, prog_bar=True)
+        # Log metrics with sync_dist=True
+        self.log('train_loss', loss, prog_bar=True, sync_dist=True)
+        self.log('train_mse', self.train_mse, prog_bar=True, sync_dist=True)
+        self.log('train_mae', self.train_mae, prog_bar=True, sync_dist=True)
+        self.log('train_mape', self.train_mape, prog_bar=True, sync_dist=True)
         
         return loss
 
@@ -544,11 +570,11 @@ class LitSTTRE(L.LightningModule):
         self.training_history['val']['MAE'].append(self.val_mae.compute().item())
         self.training_history['val']['MAPE'].append(self.val_mape.compute().item())
         
-        # Log metrics
-        self.log('val_loss', val_loss, prog_bar=True)
-        self.log('val_mse', self.val_mse, prog_bar=True)
-        self.log('val_mae', self.val_mae, prog_bar=True)
-        self.log('val_mape', self.val_mape, prog_bar=True)
+        # Log metrics with sync_dist=True
+        self.log('val_loss', val_loss, prog_bar=True, sync_dist=True)
+        self.log('val_mse', self.val_mse, prog_bar=True, sync_dist=True)
+        self.log('val_mae', self.val_mae, prog_bar=True, sync_dist=True)
+        self.log('val_mape', self.val_mape, prog_bar=True, sync_dist=True)
         
         # Update progress bar
         if self.progress_bar is None:
@@ -557,14 +583,40 @@ class LitSTTRE(L.LightningModule):
         
         return val_loss
 
+    def test_step(self, batch, batch_idx):
+        x, y = batch
+        y_hat = self(x)
+        test_loss = F.mse_loss(y_hat, y)
+        
+        # Update metrics
+        self.test_mse = MeanSquaredError().to(self.device)
+        self.test_mae = MeanAbsoluteError().to(self.device)
+        self.test_mape = MeanAbsolutePercentageError().to(self.device)
+        
+        self.test_mse(y_hat, y)
+        self.test_mae(y_hat, y)
+        self.test_mape(y_hat, y)
+        
+        # Log metrics
+        self.log('test_loss', test_loss, prog_bar=True, sync_dist=True)
+        self.log('test_mse', self.test_mse, prog_bar=True, sync_dist=True)
+        self.log('test_mae', self.test_mae, prog_bar=True, sync_dist=True)
+        self.log('test_mape', self.test_mape, prog_bar=True, sync_dist=True)
+        
+        return test_loss
+
     def on_train_epoch_end(self):
-        # Plot metrics at the end of each epoch
-        Plotter.plot_metrics(
-            self.training_history['train'],
-            self.training_history['val'],
-            ['MSE', 'MAE', 'MAPE'],
-            self.trainer.logger.name
-        )
+        try:
+            # Plot metrics at the end of each epoch
+            Plotter.plot_metrics(
+                self.training_history['train'],
+                self.training_history['val'],
+                ['MSE', 'MAE', 'MAPE'],
+                self.trainer.logger.name
+            )
+        except Exception as e:
+            print(f"Warning: Could not plot metrics: {str(e)}")
+            pass
 
     def configure_optimizers(self):
         optimizer = torch.optim.Adam(self.parameters(), lr=self.train_params['lr'])
@@ -707,11 +759,13 @@ def train_sttre(dataset_class, data_path, model_params, train_params):
         max_epochs=train_params['epochs'],
         accelerator='auto',
         devices='auto',
+        strategy='ddp_find_unused_parameters_true',  # Add this line
         logger=logger,
         callbacks=[checkpoint_callback, early_stopping],
         gradient_clip_val=train_params.get('gradient_clip', 1.0),
         precision=train_params.get('precision', 32),
-        accumulate_grad_batches=train_params.get('accumulate_grad_batches', 1)
+        accumulate_grad_batches=train_params.get('accumulate_grad_batches', 1),
+        log_every_n_steps=1  # Add this line to address logging warning
     )
 
     try:
