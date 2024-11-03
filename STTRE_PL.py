@@ -17,8 +17,9 @@ from torch import nn
 import torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader
 import lightning as L
-from lightning.pytorch.callbacks import ModelCheckpoint, EarlyStopping
+from lightning.pytorch.callbacks import ModelCheckpoint, EarlyStopping, RichProgressBar
 from lightning.pytorch.loggers import TensorBoardLogger
+from lightning.pytorch.callbacks.progress.rich_progress import RichProgressBarTheme
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
@@ -480,7 +481,7 @@ class LitSTTRE(L.LightningModule):
         self.fc_out2 = nn.Linear(model_params['embed_size']//2, 1)
         self.out = nn.Linear((self.num_elements*3), output_size)
         
-        # Metrics
+        # Initialize metrics
         metrics = ['mse', 'mae', 'mape']
         for split in ['train', 'val']:
             for metric in metrics:
@@ -491,18 +492,20 @@ class LitSTTRE(L.LightningModule):
                 }[metric]
                 setattr(self, f'{split}_{metric}', metric_class())
         
-        # Progress tracking
-        self.progress_bar = None
-        self.training_history = {
-            'train': {'MSE': [], 'MAE': [], 'MAPE': []},
-            'val': {'MSE': [], 'MAE': [], 'MAPE': []}
-        }
-        
         # Initialize test metrics
         self.test_mse = None
         self.test_mae = None
         self.test_mape = None
         
+        # Initialize training history
+        self.training_history = {
+            'train': {'MSE': [], 'MAE': [], 'MAPE': []},
+            'val': {'MSE': [], 'MAE': [], 'MAPE': []}
+        }
+        
+        # Track whether metrics have been updated
+        self.metrics_updated = False
+
     def forward(self, x):
         batch_size = len(x)
         
@@ -544,13 +547,9 @@ class LitSTTRE(L.LightningModule):
         self.train_mse(y_hat, y)
         self.train_mae(y_hat, y)
         self.train_mape(y_hat, y)
+        self.metrics_updated = True
         
-        # Store metrics for plotting
-        self.training_history['train']['MSE'].append(self.train_mse.compute().item())
-        self.training_history['train']['MAE'].append(self.train_mae.compute().item())
-        self.training_history['train']['MAPE'].append(self.train_mape.compute().item())
-        
-        # Log metrics with sync_dist=True
+        # Log metrics with sync_dist=True for proper multi-GPU logging
         self.log('train_loss', loss, prog_bar=True, sync_dist=True)
         self.log('train_mse', self.train_mse, prog_bar=True, sync_dist=True)
         self.log('train_mae', self.train_mae, prog_bar=True, sync_dist=True)
@@ -568,21 +567,11 @@ class LitSTTRE(L.LightningModule):
         self.val_mae(y_hat, y)
         self.val_mape(y_hat, y)
         
-        # Store metrics for plotting
-        self.training_history['val']['MSE'].append(self.val_mse.compute().item())
-        self.training_history['val']['MAE'].append(self.val_mae.compute().item())
-        self.training_history['val']['MAPE'].append(self.val_mape.compute().item())
-        
         # Log metrics with sync_dist=True
         self.log('val_loss', val_loss, prog_bar=True, sync_dist=True)
         self.log('val_mse', self.val_mse, prog_bar=True, sync_dist=True)
         self.log('val_mae', self.val_mae, prog_bar=True, sync_dist=True)
         self.log('val_mape', self.val_mape, prog_bar=True, sync_dist=True)
-        
-        # Update progress bar
-        if self.progress_bar is None:
-            self.progress_bar = ProgressBar(val_loss.item())
-        print(self.progress_bar.update(val_loss.item()))
         
         return val_loss
 
@@ -606,6 +595,30 @@ class LitSTTRE(L.LightningModule):
         return test_loss
 
     def on_train_epoch_end(self):
+        """Called at the end of each training epoch"""
+        # Only update history if metrics have been computed
+        if not self.metrics_updated:
+            return
+            
+        # Get current metrics
+        metrics = {
+            'train': {
+                'MSE': float(self.trainer.callback_metrics.get('train_mse', 0)),
+                'MAE': float(self.trainer.callback_metrics.get('train_mae', 0)),
+                'MAPE': float(self.trainer.callback_metrics.get('train_mape', 0))
+            },
+            'val': {
+                'MSE': float(self.trainer.callback_metrics.get('val_mse', 0)),
+                'MAE': float(self.trainer.callback_metrics.get('val_mae', 0)),
+                'MAPE': float(self.trainer.callback_metrics.get('val_mape', 0))
+            }
+        }
+        
+        # Update history
+        for split in ['train', 'val']:
+            for metric in ['MSE', 'MAE', 'MAPE']:
+                self.training_history[split][metric].append(metrics[split][metric])
+        
         try:
             # Plot metrics at the end of each epoch
             Plotter.plot_metrics(
@@ -617,6 +630,16 @@ class LitSTTRE(L.LightningModule):
         except Exception as e:
             print(f"Warning: Could not plot metrics: {str(e)}")
             pass
+
+    def on_train_epoch_start(self):
+        """Reset metrics at the start of each epoch"""
+        self.train_mse.reset()
+        self.train_mae.reset()
+        self.train_mape.reset()
+        self.val_mse.reset()
+        self.val_mae.reset()
+        self.val_mape.reset()
+        self.metrics_updated = False
 
     def configure_optimizers(self):
         optimizer = torch.optim.Adam(self.parameters(), lr=self.train_params['lr'])
@@ -710,31 +733,21 @@ def cleanup_old_checkpoints(model_dir, dataset_name, keep_top_k=3):
             os.remove(os.path.join(model_dir, checkpoint))
 
 def train_sttre(dataset_class, data_path, model_params, train_params):
-    """
-    Train the STTRE model using the specified dataset.
-    
-    Args:
-        dataset_class: The dataset class to use (Uber, AirQuality, etc.)
-        data_path: Path to the dataset file (if needed)
-        model_params: Dictionary of model parameters
-        train_params: Dictionary of training parameters
-    """
+    """Train the STTRE model using the specified dataset."""
     Config.create_directories()
     
     # Initialize data module
     data_module = STTREDataModule(
         dataset_class=dataset_class,
         data_path=data_path,
-        batch_size=train_params['batch_size'],
-        test_split=train_params.get('test_split', 0.2),
-        val_split=train_params.get('val_split', 0.1)
+        batch_size=train_params['batch_size']
     )
-
+    
     # Setup data module to get input shape
     data_module.setup()
     sample_batch = next(iter(data_module.train_dataloader()))
     input_shape = sample_batch[0].shape
-
+    
     # Initialize model
     model = LitSTTRE(
         input_shape=input_shape,
@@ -742,40 +755,51 @@ def train_sttre(dataset_class, data_path, model_params, train_params):
         model_params=model_params,
         train_params=train_params
     )
-
-    # Callbacks
-    checkpoint_callback = ModelCheckpoint(
-        monitor='val_loss',
-        dirpath=Config.MODEL_DIR,
-        filename=f'sttre-{dataset_class.__name__.lower()}-' + '{epoch:02d}-{val_loss:.2f}',
-        save_top_k=3,
-        mode='min'
-    )
-
-    early_stopping = EarlyStopping(
-        monitor='val_loss',
-        patience=train_params.get('patience', 20),
-        mode='min'
-    )
-
-    # Clean up old checkpoints
-    cleanup_old_checkpoints(Config.MODEL_DIR, dataset_class.__name__, keep_top_k=3)
-
-    # Logger
+    
+    # Setup callbacks
+    callbacks = [
+        RichProgressBar(
+            theme=RichProgressBarTheme(
+                description="white",
+                progress_bar="#6206E0",
+                progress_bar_finished="#6206E0",
+                progress_bar_pulse="#6206E0",
+                batch_progress="white",
+                time="grey54",
+                processing_speed="grey70",
+                metrics="white"
+            ),
+            leave=True
+        ),
+        ModelCheckpoint(
+            monitor='val_loss',
+            dirpath=Config.MODEL_DIR,
+            filename=f'sttre-{dataset_class.__name__.lower()}-' + '{epoch:02d}-{val_loss:.2f}',
+            save_top_k=3,
+            mode='min'
+        ),
+        EarlyStopping(
+            monitor='val_loss',
+            patience=train_params.get('patience', 20),
+            mode='min'
+        )
+    ]
+    
+    # Logger setup
     logger = TensorBoardLogger(
         save_dir=Config.SAVE_DIR,
         name=dataset_class.__name__.lower(),
         default_hp_metric=False
     )
-
-    # Training trainer
-    train_trainer = L.Trainer(
+    
+    # Initialize trainer
+    trainer = L.Trainer(
         max_epochs=train_params['epochs'],
         accelerator='auto',
         devices='auto',
         strategy='ddp_find_unused_parameters_true',
         logger=logger,
-        callbacks=[checkpoint_callback, early_stopping],
+        callbacks=callbacks,
         gradient_clip_val=train_params.get('gradient_clip', 1.0),
         precision=train_params.get('precision', 32),
         accumulate_grad_batches=train_params.get('accumulate_grad_batches', 1),
@@ -783,51 +807,20 @@ def train_sttre(dataset_class, data_path, model_params, train_params):
         enable_progress_bar=True
     )
 
-    # Testing trainer (single device)
-    test_trainer = L.Trainer(
-        accelerator='auto',
-        devices=1,
-        num_nodes=1,
-        logger=logger
-    )
-
     try:
-        # Training phase
         print(f"\n{Colors.BOLD_GREEN}Starting training for {dataset_class.__name__} dataset {Colors.ROCKET}{Colors.ENDC}")
-        train_trainer.fit(model, data_module)
+        trainer.fit(model, data_module)
         print(f"{Colors.BOLD_GREEN}Training completed! {Colors.CHECK}{Colors.ENDC}")
-
-        # Testing phase with single GPU
-        print(f"\n{Colors.BOLD_BLUE}Starting testing... {Colors.CHART}{Colors.ENDC}")
-        test_trainer = L.Trainer(
-            accelerator='gpu',
-            devices=[0],
-            logger=logger,
-            enable_progress_bar=True,
-            strategy='auto',
-            max_epochs=1,
-            num_sanity_val_steps=0
-        )
         
-        # Load model from best checkpoint
-        best_model_path = checkpoint_callback.best_model_path
-        if best_model_path:
-            model = LitSTTRE.load_from_checkpoint(best_model_path)
-
-        model = model.cuda()  # Move to GPU directly
-        test_results = test_trainer.test(model, datamodule=data_module, verbose=True)
+        print(f"\n{Colors.BOLD_BLUE}Starting testing... {Colors.CHART}{Colors.ENDC}")
+        test_results = trainer.test(model, datamodule=data_module)
         print(f"{Colors.BOLD_GREEN}Testing completed! {Colors.CHECK}{Colors.ENDC}")
-
-        return model, train_trainer, test_results
-
+        
+        return model, trainer, test_results
+        
     except Exception as e:
         print(f"{Colors.RED}Error during training: {str(e)} {Colors.CROSS}{Colors.ENDC}")
         raise
-
-    finally:
-        # Clean up distributed processes
-        if train_trainer.world_size > 1:
-            torch.distributed.destroy_process_group()
 
 def test_sttre(dataset_class, data_path, model_params, train_params, checkpoint_path):
     """
