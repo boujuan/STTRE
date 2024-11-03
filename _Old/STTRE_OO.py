@@ -3,6 +3,7 @@
 
 # TODO:
 # - Add my dataset
+# - Turn into pytorch lightning for easier parallelization
 # - Add decoder
 # - Add parallelization (DistributedDataParallel)
 # - Add dataloader for multiple datasets
@@ -582,11 +583,11 @@ class STTRETrainer:
             optimizer, 
             mode='min', 
             factor=0.5, 
-            patience=10
+            patience=20
         )
         loss_fn = nn.MSELoss()
 
-        early_stopping = EarlyStopping(patience=10, verbose=True)
+        early_stopping = EarlyStopping(patience=20, verbose=True)
         history = {
             'train': {'MSE': [], 'MAE': [], 'MAPE': []},
             'val': {'MSE': [], 'MAE': [], 'MAPE': []}
@@ -849,16 +850,16 @@ def main(mode='both'):
     train_params = {
         'dropout': 0.2, # Default: 0.2
         'lr': 0.0001, # Default: 0.0001
-        'batch_size': 512, # Default: 512
-        'NUM_EPOCHS': 1000, # Default: 1000
+        'batch_size': 256, # Default: 512
+        'NUM_EPOCHS': 1320, # Default: 1000
         'TEST_SPLIT': 0.3 # Default: 0.3
     }
 
     trainer = STTRETrainer(model_params, train_params)
 
     datasets = {
-        'Uber': (Uber, os.path.join(Config.DATA_DIR, 'uber_stock.csv')),
-        # 'AirQuality': (AirQuality, None),
+        # 'Uber': (Uber, os.path.join(Config.DATA_DIR, 'uber_stock.csv')),
+        'AirQuality': (AirQuality, None),
         # 'IstanbulStock': (IstanbulStock, os.path.join(Config.DATA_DIR, 'istanbul_stock.csv')),
         # 'Traffic': (Traffic, os.path.join(Config.DATA_DIR, 'traffic.csv')),
         # 'AppliancesEnergy1': (AppliancesEnergy1, os.path.join(Config.DATA_DIR, 'appliances_energy1.csv')),

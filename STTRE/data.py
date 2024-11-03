@@ -1,61 +1,85 @@
 import lightning as L
 from torch.utils.data import DataLoader
 import numpy as np
+import os
 
 from .dataset import TimeSeriesDataset
 
 class BaseDataModule(L.LightningDataModule):
     def __init__(self, data_dir: str, seq_len: int, columns: list, batch_size: int = 32):
         super().__init__()
-        self.data_dir = data_dir
+        self.data_dir = os.path.expanduser(data_dir)
         self.seq_len = seq_len
         self.columns = columns
         self.batch_size = batch_size
-        self.data = None
         
     def setup(self, stage=None):
-        # Load and process data
-        data = []
-        with open(self.data_dir, 'r') as file:
-            next(file)  # Skip header
-            for line in file:
-                try:
-                    row = [float(line.split(',')[col]) for col in self.columns]
-                    data.append(row)
-                except ValueError:
-                    continue
-                    
-        data = np.array(data)
-        X = self.normalize(data[:, :-1])
-        y = data[:, [-1]]
-        
-        # Split data into train/val/test
-        train_size = int(0.7 * len(y))
-        val_size = int(0.15 * len(y))
-        
-        self.train_data = (X[:train_size], y[:train_size])
-        self.val_data = (X[train_size:train_size+val_size], 
-                        y[train_size:train_size+val_size])
-        self.test_data = (X[train_size+val_size:], y[train_size+val_size:])
+        try:
+            data = []
+            with open(self.data_dir, 'r') as file:
+                header = next(file)  # Read header to get column names
+                next(file)  # Skip Ticker row
+                next(file)  # Skip Date row
+                
+                for line in file:
+                    values = line.strip().split(',')
+                    if len(values) >= max(self.columns):  # Make sure we have enough columns
+                        try:
+                            # Convert only the columns we need
+                            row = []
+                            for col in self.columns:
+                                val = float(values[col])
+                                row.append(val)
+                            data.append(row)
+                        except (ValueError, IndexError):
+                            continue
+            
+            if not data:
+                raise ValueError("No valid data rows found")
+            
+            data = np.array(data)
+            # Split into features and target (last column is Price)
+            X = data[:, :-1]  # All columns except Price
+            y = data[:, [-1]]  # Price column only
+            
+            # Normalize
+            X = self.normalize(X)
+            y = self.normalize(y)
+            
+            # Split data
+            train_size = int(0.7 * len(y))
+            val_size = int(0.15 * len(y))
+            
+            self.train_data = (X[:train_size], y[:train_size])
+            self.val_data = (X[train_size:train_size+val_size], 
+                            y[train_size:train_size+val_size])
+            self.test_data = (X[train_size+val_size:], y[train_size+val_size:])
+            
+        except Exception as e:
+            raise ValueError(f"Error loading data: {str(e)}")
 
     def train_dataloader(self):
-        return DataLoader(self._create_dataset(*self.train_data), 
-                         batch_size=self.batch_size, 
-                         shuffle=True)
+        return DataLoader(
+            TimeSeriesDataset(self.train_data[0], self.train_data[1], self.seq_len),
+            batch_size=self.batch_size,
+            shuffle=True
+        )
 
     def val_dataloader(self):
-        return DataLoader(self._create_dataset(*self.val_data), 
-                         batch_size=self.batch_size)
+        return DataLoader(
+            TimeSeriesDataset(self.val_data[0], self.val_data[1], self.seq_len),
+            batch_size=self.batch_size
+        )
 
     def test_dataloader(self):
-        return DataLoader(self._create_dataset(*self.test_data), 
-                         batch_size=self.batch_size)
-                         
-    def _create_dataset(self, X, y):
-        return TimeSeriesDataset(X, y, self.seq_len)
+        return DataLoader(
+            TimeSeriesDataset(self.test_data[0], self.test_data[1], self.seq_len),
+            batch_size=self.batch_size
+        )
 
     @staticmethod
     def normalize(X):
-        X = np.transpose(X)
-        X_norm = [(x - np.min(x)) / (np.max(x) - np.min(x)) for x in X]
-        return np.transpose(X_norm) 
+        X = np.array(X, dtype=np.float32)
+        min_vals = np.min(X, axis=0)
+        max_vals = np.max(X, axis=0)
+        return (X - min_vals) / (max_vals - min_vals)

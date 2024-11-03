@@ -3,6 +3,7 @@
 
 # TODO:
 # - Add my dataset
+# - Turn into pytorch lightning for easier parallelization
 # - Add decoder
 # - Add parallelization (DistributedDataParallel)
 # - Add dataloader for multiple datasets
@@ -10,26 +11,22 @@
 
 import warnings
 import os
-from pathlib import Path
-import sys
-
 import numpy as np
-import polars as pl
-
 import torch
 from torch import nn
 import torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader
 import lightning as L
-from lightning.pytorch.callbacks import EarlyStopping, ModelCheckpoint
+from lightning.pytorch.callbacks import ModelCheckpoint, EarlyStopping
 from lightning.pytorch.loggers import TensorBoardLogger
-# from torch.utils.data.sampler import SubsetRandomSampler
-# from torchmetrics import MeanSquaredError, MeanAbsolutePercentageError, MeanAbsoluteError
-
 import matplotlib
-import matplotlib.pyplot as plt
-import seaborn as sns
 matplotlib.use('Agg')
+import matplotlib.pyplot as plt
+from pathlib import Path
+import seaborn as sns
+import polars as pl
+import sys
+from torchmetrics import MeanSquaredError, MeanAbsolutePercentageError, MeanAbsoluteError
 
 warnings.filterwarnings('ignore', category=UserWarning, module='pandas.core.computation.expressions')
 
@@ -94,23 +91,80 @@ class Config:
         for directory in [cls.SAVE_DIR, cls.MODEL_DIR, cls.PLOT_DIR, cls.DATA_DIR]:
             os.makedirs(directory, exist_ok=True)
 
-class DeviceManager:
-    _device_info_printed = False
+class ProgressBar:
+    def __init__(self, initial_error, target_error=0, width=50):
+        self.initial_error = initial_error
+        self.target_error = target_error
+        self.width = width
+        self.best_error = initial_error
+        
+    def update(self, current_error):
+        self.best_error = min(self.best_error, current_error)
+        # Calculate progress (0 to 1) where 1 means error reduced to target
+        progress = 1 - (self.best_error - self.target_error) / (self.initial_error - self.target_error)
+        progress = max(0, min(1, progress))  # Clamp between 0 and 1
+        
+        # Create the progress bar
+        filled_length = int(self.width * progress)
+        bar = '█' * filled_length + '░' * (self.width - filled_length)
+        
+        # Calculate percentage
+        percent = progress * 100
+        
+        return f'{Colors.BOLD_BLUE}Progress: |{Colors.GREEN}{bar}{Colors.BOLD_BLUE}| {percent:6.2f}% {Colors.ENDC}'
 
-    @classmethod
-    def get_device(cls):
-        if torch.cuda.is_available():
-            device = torch.device('cuda')
-            if not cls._device_info_printed:
-                print(f"Using GPU: {torch.cuda.get_device_name(0)}")
-                print(f"CUDA version: {torch.version.cuda}")
-                cls._device_info_printed = True
-        else:
-            device = torch.device('cpu')
-            if not cls._device_info_printed:
-                print("GPU not available, using CPU")
-                cls._device_info_printed = True
-        return device
+class Plotter:
+    @staticmethod
+    def plot_metrics(train_metrics, val_metrics, metric_names, dataset):
+        sns.set_style("whitegrid")
+        sns.set_context("paper", font_scale=1.5)
+        
+        if not hasattr(Plotter.plot_metrics, 'fig'):
+            Plotter.plot_metrics.fig, Plotter.plot_metrics.axes = plt.subplots(1, len(metric_names), 
+                                                                               figsize=(20, 7), 
+                                                                               dpi=300)
+        
+        all_data = []
+        for metric_name in metric_names:
+            epochs = list(range(1, len(train_metrics[metric_name]) + 1))
+            
+            all_data.append(pl.DataFrame({
+                'Epoch': epochs,
+                'Value': train_metrics[metric_name],
+                'Type': ['Train'] * len(epochs),
+                'Metric': [metric_name] * len(epochs)
+            }))
+            
+            all_data.append(pl.DataFrame({
+                'Epoch': epochs,
+                'Value': val_metrics[metric_name],
+                'Type': ['Validation'] * len(epochs),
+                'Metric': [metric_name] * len(epochs)
+            }))
+        
+        df = pl.concat(all_data)
+        
+        for i, metric_name in enumerate(metric_names):
+            Plotter.plot_metrics.axes[i].clear()
+            
+            metric_data = df.filter(pl.col('Metric') == metric_name)
+            
+            sns.lineplot(data=metric_data, x='Epoch', y='Value', hue='Type', 
+                        ax=Plotter.plot_metrics.axes[i],
+                        palette=['#2ecc71', '#e74c3c'],
+                        linewidth=2.5)
+            
+            Plotter.plot_metrics.axes[i].set_title(metric_name, pad=20, fontsize=16, fontweight='bold')
+            Plotter.plot_metrics.axes[i].set_xlabel('Epoch', fontsize=12)
+            Plotter.plot_metrics.axes[i].set_ylabel(metric_name, fontsize=12)
+            Plotter.plot_metrics.axes[i].legend(title=None, fontsize=10)
+            Plotter.plot_metrics.axes[i].tick_params(axis='both', which='major', labelsize=10)
+        
+        Plotter.plot_metrics.fig.tight_layout(pad=3.0)
+        Plotter.plot_metrics.fig.savefig(os.path.join(Config.PLOT_DIR, f'{dataset}_metrics_latest.png'), 
+                                        bbox_inches='tight',
+                                        facecolor='white',
+                                        edgecolor='none')
 
 class BaseDataset(Dataset):
     def __init__(self, dir, seq_len, columns):
@@ -222,7 +276,6 @@ class AppliancesEnergy2(BaseDataset):
 class SelfAttention(nn.Module):
     def __init__(self, embed_size, heads, seq_len, module, rel_emb):
         super(SelfAttention, self).__init__()
-        self.device = DeviceManager.get_device()
         self.embed_size = embed_size
         self.heads = heads
         self.seq_len = seq_len
@@ -234,22 +287,22 @@ class SelfAttention(nn.Module):
         if module in ['spatial', 'temporal']:
             self.head_dim = seq_len
             self.values = nn.Linear(self.embed_size, self.embed_size, dtype=torch.float32)
-            self.keys = nn.Linear(self.embed_size, self.embed_size, dtype=torch.float32, device=self.device)
-            self.queries = nn.Linear(self.embed_size, self.embed_size, dtype=torch.float32, device=self.device)
+            self.keys = nn.Linear(self.embed_size, self.embed_size, dtype=torch.float32)
+            self.queries = nn.Linear(self.embed_size, self.embed_size, dtype=torch.float32)
 
             if rel_emb:
-                self.E = nn.Parameter(torch.randn([self.heads, self.head_dim, self.embed_size], device=self.device))
+                self.E = nn.Parameter(torch.randn([self.heads, self.head_dim, self.embed_size]))
         else:
             self.head_dim = embed_size // heads
             assert (self.head_dim * heads == embed_size), "Embed size not div by heads"
             self.values = nn.Linear(self.head_dim, self.head_dim, dtype=torch.float32)
-            self.keys = nn.Linear(self.head_dim, self.head_dim, dtype=torch.float32, device=self.device)
-            self.queries = nn.Linear(self.head_dim, self.head_dim, dtype=torch.float32, device=self.device)
+            self.keys = nn.Linear(self.head_dim, self.head_dim, dtype=torch.float32)
+            self.queries = nn.Linear(self.head_dim, self.head_dim, dtype=torch.float32)
 
             if rel_emb:
-                self.E = nn.Parameter(torch.randn([1, self.seq_len, self.head_dim], device=self.device))
+                self.E = nn.Parameter(torch.randn([1, self.seq_len, self.head_dim]))
 
-        self.fc_out = nn.Linear(self.embed_size, self.embed_size, device=self.device)
+        self.fc_out = nn.Linear(self.embed_size, self.embed_size)
 
     def forward(self, x):
         N, _, _ = x.shape
@@ -275,13 +328,13 @@ class SelfAttention(nn.Module):
             QE = self._mask_positions(QE)
             S = self._skew(QE).contiguous().view(N, self.heads, self.seq_len, self.seq_len)
             qk = torch.einsum("nqhd,nkhd->nhqk", [queries, keys])
-            mask = torch.triu(torch.ones(1, self.seq_len, self.seq_len, device=self.device), 1)
+            mask = torch.triu(torch.ones(1, self.seq_len, self.seq_len), 1)
             if mask is not None:
                 qk = qk.masked_fill(mask == 0, float("-1e20"))
             attention = torch.softmax(qk / (self.embed_size ** (1/2)), dim=3) + S
         else:
             qk = torch.einsum("nqhd,nkhd->nhqk", [queries, keys])
-            mask = torch.triu(torch.ones(1, self.seq_len, self.seq_len, device=self.device), 1)
+            mask = torch.triu(torch.ones(1, self.seq_len, self.seq_len), 1)
             if mask is not None:
                 qk = qk.masked_fill(mask == 0, float("-1e20"))
             attention = torch.softmax(qk / (self.embed_size ** (1/2)), dim=3)
@@ -296,7 +349,7 @@ class SelfAttention(nn.Module):
 
     def _mask_positions(self, qe):
         L = qe.shape[-1]
-        mask = torch.triu(torch.ones(L, L, device=self.device), 1).flip(1)
+        mask = torch.triu(torch.ones(L, L), 1).flip(1)
         return qe.masked_fill((mask == 1), 0)
 
     def _skew(self, qe):
@@ -350,521 +403,360 @@ class Encoder(nn.Module):
         out = self.fc_out(out)
         return out
 
-class STTRE(nn.Module):
-    def __init__(self, input_shape, output_size, embed_size, num_layers, forward_expansion, heads):
-        super(STTRE, self).__init__()
+class LitSTTRE(L.LightningModule):
+    def __init__(self, input_shape, output_size, model_params, train_params):
+        super().__init__()
+        self.save_hyperparameters()
         self.batch_size, self.num_var, self.seq_len = input_shape
-        self.device = DeviceManager.get_device()
         self.num_elements = self.seq_len * self.num_var
-        self.embed_size = embed_size
-        self.element_embedding = nn.Linear(self.seq_len, embed_size*self.seq_len)
-        self.pos_embedding = nn.Embedding(self.seq_len, embed_size)
-        self.variable_embedding = nn.Embedding(self.num_var, embed_size)
-
-        self.temporal = Encoder(seq_len=self.seq_len, embed_size=embed_size, num_layers=num_layers,
-                                heads=self.num_var, device=self.device, forward_expansion=forward_expansion,
-                                module='temporal', rel_emb=True)
-
-        self.spatial = Encoder(seq_len=self.num_var, embed_size=embed_size, num_layers=num_layers,
-                               heads=self.seq_len, device=self.device, forward_expansion=forward_expansion,
-                               module='spatial', rel_emb=True)
-
-        self.spatiotemporal = Encoder(seq_len=self.seq_len*self.num_var, embed_size=embed_size, num_layers=num_layers,
-                                      heads=heads, device=self.device, forward_expansion=forward_expansion,
-                                      module='spatiotemporal', rel_emb=True)
-
-        self.fc_out1 = nn.Linear(embed_size, embed_size//2)
-        self.fc_out2 = nn.Linear(embed_size//2, 1)
-        self.out = nn.Linear((self.num_elements*3), output_size)
-
-    def forward(self, x, dropout):
-        batch_size = len(x)
-
-        positions = torch.arange(0, self.seq_len).expand(batch_size, self.num_var, self.seq_len).reshape(batch_size, self.num_var * self.seq_len).to(self.device)
-        x_temporal = self.element_embedding(x).reshape(batch_size, self.num_elements, self.embed_size)
-        x_temporal = F.dropout(self.pos_embedding(positions) + x_temporal, dropout)
-
-        x_spatial = torch.transpose(x, 1, 2).reshape(batch_size, self.num_var, self.seq_len)
-        vars = torch.arange(0, self.num_var).expand(batch_size, self.seq_len, self.num_var).reshape(batch_size, self.num_var * self.seq_len).to(self.device)
-        x_spatial = self.element_embedding(x_spatial).reshape(batch_size, self.num_elements, self.embed_size)
-        x_spatial = F.dropout(self.variable_embedding(vars) + x_spatial, dropout)
-
-        positions = torch.arange(0, self.seq_len).expand(batch_size, self.num_var, self.seq_len).reshape(batch_size, self.num_var* self.seq_len).to(self.device)
-        x_spatio_temporal = self.element_embedding(x).reshape(batch_size, self.seq_len* self.num_var, self.embed_size)
-        x_spatio_temporal = F.dropout(self.pos_embedding(positions) + x_spatio_temporal, dropout)
-
-        out1 = self.temporal(x_temporal)
-        out2 = self.spatial(x_spatial)
-        out3 = self.spatiotemporal(x_spatio_temporal)
-        out = torch.cat((out1, out2, out3), 1)
-        out = self.fc_out1(out)
-        out = F.leaky_relu(out)
-        out = self.fc_out2(out)
-        out = F.leaky_relu(out)
-        out = torch.flatten(out, 1)
-        out = self.out(out)
-
-        return out
-
-class ProgressBar:
-    def __init__(self, initial_error, target_error=0, width=50):
-        self.initial_error = initial_error
-        self.target_error = target_error
-        self.width = width
-        self.best_error = initial_error
-        
-    def update(self, current_error):
-        self.best_error = min(self.best_error, current_error)
-        # Calculate progress (0 to 1) where 1 means error reduced to target
-        progress = 1 - (self.best_error - self.target_error) / (self.initial_error - self.target_error)
-        progress = max(0, min(1, progress))  # Clamp between 0 and 1
-        
-        # Create the progress bar
-        filled_length = int(self.width * progress)
-        bar = '█' * filled_length + '░' * (self.width - filled_length)
-        
-        # Calculate percentage
-        percent = progress * 100
-        
-        return f'{Colors.BOLD_BLUE}Progress: |{Colors.GREEN}{bar}{Colors.BOLD_BLUE}| {percent:6.2f}% {Colors.ENDC}'
-
-class EarlyStopping:
-    def __init__(self, patience=10, min_delta=0, verbose=True):
-        self.patience = patience
-        self.min_delta = min_delta
-        self.verbose = verbose
-        self.counter = 0
-        self.best_loss = None
-        self.early_stop = False
-        self.val_loss_min = float('inf')
-        self.current_epoch = 0
-        self.progress_bar = None
-
-    def __call__(self, val_loss, model, path, epoch=None):
-        # Initialize progress bar with first validation loss if not exists
-        if self.progress_bar is None:
-            self.progress_bar = ProgressBar(val_loss)
-            
-        self.current_epoch = epoch if epoch is not None else self.current_epoch + 1
-        
-        if self.best_loss is None:
-            self.best_loss = val_loss
-            self.save_checkpoint(val_loss, model, path)
-        elif val_loss > self.best_loss + self.min_delta:
-            self.counter += 1
-            if self.verbose:
-                print(f'\n{Colors.BOLD_GREEN}Epoch {self.current_epoch}:{Colors.ENDC} {Colors.RED}Validation loss increased ({self.best_loss:.6f} --> {val_loss:.6f}) {Colors.CROSS}{Colors.ENDC} {Colors.BOLD_RED}[{self.counter}/{self.patience}]{Colors.ENDC}{Colors.WARNING}')
-                print(self.progress_bar.update(val_loss))
-            if self.counter >= self.patience:
-                self.early_stop = True
-        else:
-            if self.verbose and (self.best_loss - val_loss) > self.min_delta:
-                print(f'\n{Colors.BOLD_GREEN}Epoch {self.current_epoch}:{Colors.ENDC} {Colors.GREEN}Validation loss decreased ({self.best_loss:.6f} --> {val_loss:.6f}) {Colors.FIRE}{Colors.ENDC}')
-                # print(f'{Colors.BLUE}Saving model... {Colors.SAVE}{Colors.ENDC}')
-                print(self.progress_bar.update(val_loss))
-            self.best_loss = val_loss
-            self.save_checkpoint(val_loss, model, path)
-            self.counter = 0
-
-    def save_checkpoint(self, val_loss, model, path):
-        # if self.verbose and (self.val_loss_min - val_loss) > self.min_delta:
-        #     print(f'Saving model ...')
-        full_path = os.path.join(Config.MODEL_DIR, path)
-        torch.save(model.state_dict(), full_path)
-        self.val_loss_min = val_loss
-
-class Plotter:
-    @staticmethod
-    def plot_metrics(train_metrics, val_metrics, metric_names, dataset):
-        sns.set_style("whitegrid")
-        sns.set_context("paper", font_scale=1.5)
-        
-        if not hasattr(Plotter.plot_metrics, 'fig'):
-            Plotter.plot_metrics.fig, Plotter.plot_metrics.axes = plt.subplots(1, len(metric_names), 
-                                                                               figsize=(20, 7), 
-                                                                               dpi=300)
-        
-        all_data = []
-        for metric_name in metric_names:
-            epochs = list(range(1, len(train_metrics[metric_name]) + 1))
-            
-            all_data.append(pl.DataFrame({
-                'Epoch': epochs,
-                'Value': train_metrics[metric_name],
-                'Type': ['Train'] * len(epochs),
-                'Metric': [metric_name] * len(epochs)
-            }))
-            
-            all_data.append(pl.DataFrame({
-                'Epoch': epochs,
-                'Value': val_metrics[metric_name],
-                'Type': ['Validation'] * len(epochs),
-                'Metric': [metric_name] * len(epochs)
-            }))
-        
-        df = pl.concat(all_data)
-        
-        for i, metric_name in enumerate(metric_names):
-            Plotter.plot_metrics.axes[i].clear()
-            
-            metric_data = df.filter(pl.col('Metric') == metric_name)
-            
-            sns.lineplot(data=metric_data, x='Epoch', y='Value', hue='Type', 
-                        ax=Plotter.plot_metrics.axes[i],
-                        palette=['#2ecc71', '#e74c3c'],
-                        linewidth=2.5)
-            
-            Plotter.plot_metrics.axes[i].set_title(metric_name, pad=20, fontsize=16, fontweight='bold')
-            Plotter.plot_metrics.axes[i].set_xlabel('Epoch', fontsize=12)
-            Plotter.plot_metrics.axes[i].set_ylabel(metric_name, fontsize=12)
-            Plotter.plot_metrics.axes[i].legend(title=None, fontsize=10)
-            Plotter.plot_metrics.axes[i].tick_params(axis='both', which='major', labelsize=10)
-        
-        Plotter.plot_metrics.fig.tight_layout(pad=3.0)
-        Plotter.plot_metrics.fig.savefig(os.path.join(Config.PLOT_DIR, f'{dataset}_metrics_latest.png'), 
-                                        bbox_inches='tight',
-                                        facecolor='white',
-                                        edgecolor='none')
-
-class STTRETrainer:
-    def __init__(self, model_params, train_params):
-        self.model_params = model_params
+        self.embed_size = model_params['embed_size']
         self.train_params = train_params
-        self.device = DeviceManager.get_device()
-
-    def prepare_data(self, dataset_class, dir):
-        try:
-            dataset = dataset_class(dir)
-            if len(dataset) == 0:
-                raise ValueError(f"Dataset is empty after processing. Please check the file: {dir}")
-            
-            dataset_size = len(dataset)
-            indices = list(range(dataset_size))
-            split = int(np.floor(self.train_params['TEST_SPLIT'] * dataset_size))
-            
-            np.random.seed(42)
-            np.random.shuffle(indices)
-            train_indices, test_indices = indices[split:], indices[:split]
-            
-            train_sampler = SubsetRandomSampler(train_indices)
-            test_sampler = SubsetRandomSampler(test_indices)
-            
-            train_dataloader = DataLoader(
-                dataset, 
-                batch_size=self.train_params['batch_size'],
-                sampler=train_sampler,
-                num_workers=2,
-                pin_memory=True,
-                persistent_workers=True
-            )
-            test_dataloader = DataLoader(
-                dataset, 
-                batch_size=self.train_params['batch_size'],
-                sampler=test_sampler,
-                num_workers=2,
-                pin_memory=True,
-                persistent_workers=True
-            )
-            
-            return train_dataloader, test_dataloader
-
-        except Exception as e:
-            print(f"Error preparing data: {str(e)}")
-            return None, None
-
-    def train(self, train_dataloader, test_dataloader, dataset_name):
-        inputs, _ = next(iter(train_dataloader))
-        model = STTRE(
-            inputs.shape, 
-            1, 
-            embed_size=self.model_params['embed_size'],
-            num_layers=self.model_params['num_layers'],
-            forward_expansion=self.model_params['forward_expansion'],
-            heads=self.model_params['heads']
-        ).to(self.device)
         
-        optimizer = torch.optim.Adam(model.parameters(), lr=self.train_params['lr'])
-        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-            optimizer, 
-            mode='min', 
-            factor=0.5, 
-            patience=10
+        # Model components
+        self.element_embedding = nn.Linear(self.seq_len, model_params['embed_size']*self.seq_len)
+        self.pos_embedding = nn.Embedding(self.seq_len, model_params['embed_size'])
+        self.variable_embedding = nn.Embedding(self.num_var, model_params['embed_size'])
+        
+        # Encoder components
+        self.temporal = Encoder(
+            seq_len=self.seq_len,
+            embed_size=model_params['embed_size'],
+            num_layers=model_params['num_layers'],
+            heads=self.num_var,
+            device=self.device,
+            forward_expansion=model_params['forward_expansion'],
+            module='temporal',
+            rel_emb=True
         )
-        loss_fn = nn.MSELoss()
-
-        early_stopping = EarlyStopping(patience=10, verbose=True)
-        history = {
+        
+        self.spatial = Encoder(
+            seq_len=self.num_var,
+            embed_size=model_params['embed_size'],
+            num_layers=model_params['num_layers'],
+            heads=self.seq_len,
+            device=self.device,
+            forward_expansion=model_params['forward_expansion'],
+            module='spatial',
+            rel_emb=True
+        )
+        
+        self.spatiotemporal = Encoder(
+            seq_len=self.seq_len*self.num_var,
+            embed_size=model_params['embed_size'],
+            num_layers=model_params['num_layers'],
+            heads=model_params['heads'],
+            device=self.device,
+            forward_expansion=model_params['forward_expansion'],
+            module='spatiotemporal',
+            rel_emb=True
+        )
+        
+        # Output layers
+        self.fc_out1 = nn.Linear(model_params['embed_size'], model_params['embed_size']//2)
+        self.fc_out2 = nn.Linear(model_params['embed_size']//2, 1)
+        self.out = nn.Linear((self.num_elements*3), output_size)
+        
+        # Metrics
+        metrics = ['mse', 'mae', 'mape']
+        for split in ['train', 'val']:
+            for metric in metrics:
+                metric_class = {
+                    'mse': MeanSquaredError,
+                    'mae': MeanAbsoluteError,
+                    'mape': MeanAbsolutePercentageError
+                }[metric]
+                setattr(self, f'{split}_{metric}', metric_class())
+        
+        # Progress tracking
+        self.progress_bar = None
+        self.training_history = {
             'train': {'MSE': [], 'MAE': [], 'MAPE': []},
             'val': {'MSE': [], 'MAE': [], 'MAPE': []}
         }
+        
+    def forward(self, x):
+        batch_size = len(x)
+        
+        # Temporal embedding
+        positions = torch.arange(0, self.seq_len).expand(batch_size, self.num_var, self.seq_len).reshape(batch_size, self.num_var * self.seq_len).to(self.device)
+        x_temporal = self.element_embedding(x).reshape(batch_size, self.num_elements, self.embed_size)
+        x_temporal = F.dropout(self.pos_embedding(positions) + x_temporal, self.train_params['dropout'] if self.training else 0)
+        
+        # Spatial embedding
+        x_spatial = torch.transpose(x, 1, 2).reshape(batch_size, self.num_var, self.seq_len)
+        vars = torch.arange(0, self.num_var).expand(batch_size, self.seq_len, self.num_var).reshape(batch_size, self.num_var * self.seq_len).to(self.device)
+        x_spatial = self.element_embedding(x_spatial).reshape(batch_size, self.num_elements, self.embed_size)
+        x_spatial = F.dropout(self.variable_embedding(vars) + x_spatial, self.train_params['dropout'] if self.training else 0)
+        
+        # Spatiotemporal embedding
+        x_spatio_temporal = self.element_embedding(x).reshape(batch_size, self.seq_len* self.num_var, self.embed_size)
+        x_spatio_temporal = F.dropout(self.pos_embedding(positions) + x_spatio_temporal, self.train_params['dropout'] if self.training else 0)
+        
+        # Process through encoders
+        out1 = self.temporal(x_temporal)
+        out2 = self.spatial(x_spatial)
+        out3 = self.spatiotemporal(x_spatio_temporal)
+        
+        # Final processing
+        out = torch.cat((out1, out2, out3), 1)
+        out = F.leaky_relu(self.fc_out1(out))
+        out = F.leaky_relu(self.fc_out2(out))
+        out = torch.flatten(out, 1)
+        out = self.out(out)
+        
+        return out
 
-        metrics = {
-            'train': {
-                'mse': MeanSquaredError().to(self.device),
-                'mae': MeanAbsoluteError().to(self.device),
-                'mape': MeanAbsolutePercentageError().to(self.device)
-            },
-            'val': {
-                'mse': MeanSquaredError().to(self.device),
-                'mae': MeanAbsoluteError().to(self.device),
-                'mape': MeanAbsolutePercentageError().to(self.device)
+    def training_step(self, batch, batch_idx):
+        x, y = batch
+        y_hat = self(x)
+        loss = F.mse_loss(y_hat, y)
+        
+        # Update metrics
+        self.train_mse(y_hat, y)
+        self.train_mae(y_hat, y)
+        self.train_mape(y_hat, y)
+        
+        # Store metrics for plotting
+        self.training_history['train']['MSE'].append(self.train_mse.compute().item())
+        self.training_history['train']['MAE'].append(self.train_mae.compute().item())
+        self.training_history['train']['MAPE'].append(self.train_mape.compute().item())
+        
+        # Log metrics
+        self.log('train_loss', loss, prog_bar=True)
+        self.log('train_mse', self.train_mse, prog_bar=True)
+        self.log('train_mae', self.train_mae, prog_bar=True)
+        self.log('train_mape', self.train_mape, prog_bar=True)
+        
+        return loss
+
+    def validation_step(self, batch, batch_idx):
+        x, y = batch
+        y_hat = self(x)
+        val_loss = F.mse_loss(y_hat, y)
+        
+        # Update metrics
+        self.val_mse(y_hat, y)
+        self.val_mae(y_hat, y)
+        self.val_mape(y_hat, y)
+        
+        # Store metrics for plotting
+        self.training_history['val']['MSE'].append(self.val_mse.compute().item())
+        self.training_history['val']['MAE'].append(self.val_mae.compute().item())
+        self.training_history['val']['MAPE'].append(self.val_mape.compute().item())
+        
+        # Log metrics
+        self.log('val_loss', val_loss, prog_bar=True)
+        self.log('val_mse', self.val_mse, prog_bar=True)
+        self.log('val_mae', self.val_mae, prog_bar=True)
+        self.log('val_mape', self.val_mape, prog_bar=True)
+        
+        # Update progress bar
+        if self.progress_bar is None:
+            self.progress_bar = ProgressBar(val_loss.item())
+        print(self.progress_bar.update(val_loss.item()))
+        
+        return val_loss
+
+    def on_train_epoch_end(self):
+        # Plot metrics at the end of each epoch
+        Plotter.plot_metrics(
+            self.training_history['train'],
+            self.training_history['val'],
+            ['MSE', 'MAE', 'MAPE'],
+            self.trainer.logger.name
+        )
+
+    def configure_optimizers(self):
+        optimizer = torch.optim.Adam(self.parameters(), lr=self.train_params['lr'])
+        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+            optimizer,
+            mode='min',
+            factor=0.5,
+            patience=20
+        )
+        return {
+            "optimizer": optimizer,
+            "lr_scheduler": {
+                "scheduler": scheduler,
+                "monitor": "val_loss"
             }
         }
 
-        # Initialize progress bar with first batch loss
-        inputs, labels = next(iter(train_dataloader))
-        inputs, labels = inputs.to(self.device), labels.to(self.device)
-        outputs = model(inputs, self.train_params['dropout'])
-        initial_loss = loss_fn(outputs, labels).item()
-        progress_bar = ProgressBar(initial_loss)
-        
-        for epoch in range(self.train_params['NUM_EPOCHS']):
-            model.train()
-            train_loss = 0
-            num_batches = 0
+class STTREDataModule(L.LightningDataModule):
+    def __init__(self, dataset_class, data_path, batch_size, test_split=0.2, val_split=0.1):
+        super().__init__()
+        self.dataset_class = dataset_class
+        self.data_path = data_path
+        self.batch_size = batch_size
+        self.test_split = test_split
+        self.val_split = val_split
+
+    def setup(self, stage=None):
+        try:
+            # Create full dataset
+            full_dataset = self.dataset_class(self.data_path)
             
-            for inputs, labels in train_dataloader:
-                inputs, labels = inputs.to(self.device), labels.to(self.device)
-                optimizer.zero_grad(set_to_none=True)
-                
-                outputs = model(inputs, self.train_params['dropout'])
-                loss = loss_fn(outputs, labels)
-                loss.backward()
-                
-                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-                optimizer.step()
-                
-                train_loss += loss.item()
-                num_batches += 1
-                
-                for metric in metrics['train'].values():
-                    metric.update(outputs, labels)
-
-            train_loss = train_loss / num_batches
-
-            model.eval()
-            val_loss = 0
-            num_val_batches = 0
+            if len(full_dataset) == 0:
+                raise ValueError(f"Dataset is empty after processing. Please check the file: {self.data_path}")
             
-            with torch.no_grad():
-                for inputs, labels in test_dataloader:
-                    inputs, labels = inputs.to(self.device), labels.to(self.device)
-                    outputs = model(inputs, 0)
-                    val_loss += loss_fn(outputs, labels).item()
-                    num_val_batches += 1
-                    
-                    for metric in metrics['val'].values():
-                        metric.update(outputs, labels)
-
-            val_loss = val_loss / num_val_batches
-
-            current_metrics = {
-                'train': {},
-                'val': {}
-            }
+            # Calculate lengths
+            dataset_size = len(full_dataset)
+            test_size = int(self.test_split * dataset_size)
+            val_size = int(self.val_split * dataset_size)
+            train_size = dataset_size - test_size - val_size
             
-            for phase in ['train', 'val']:
-                for name, metric in metrics[phase].items():
-                    value = metric.compute()
-                    current_metrics[phase][name] = value
-                    history[phase][name.upper()].append(value.item())
-                    metric.reset()
-
-            scheduler.step(val_loss)
+            # Split dataset
+            self.train_dataset, self.val_dataset, self.test_dataset = torch.utils.data.random_split(
+                full_dataset, 
+                [train_size, val_size, test_size],
+                generator=torch.Generator().manual_seed(42)
+            )
             
-            early_stopping(val_loss, model, f'best_model_{dataset_name}.pth', epoch + 1)
+            print(f"{Colors.BOLD_BLUE}Dataset splits:{Colors.ENDC}")
+            print(f"{Colors.CYAN}Training samples: {train_size}{Colors.ENDC}")
+            print(f"{Colors.YELLOW}Validation samples: {val_size}{Colors.ENDC}")
+            print(f"{Colors.GREEN}Test samples: {test_size}{Colors.ENDC}")
             
-            # After validation phase, update and display progress
-            # if epoch % 5 == 0:
-            #     print(f'{Colors.BOLD_BLUE}Epoch {epoch+1}/{self.train_params["NUM_EPOCHS"]} {Colors.HOURGLASS}{Colors.ENDC}')
-            #     print(f'{Colors.CYAN}Train Loss: {train_loss:.4f}, '
-            #           f'MSE: {current_metrics["train"]["mse"]:.4f}, '
-            #           f'MAE: {current_metrics["train"]["mae"]:.4f}, '
-            #           f'MAPE: {current_metrics["train"]["mape"]:.4f} {Colors.CHART}{Colors.ENDC}')
-            #     print(f'{Colors.YELLOW}Val Loss: {val_loss:.4f}, '
-            #           f'MSE: {current_metrics["val"]["mse"]:.4f}, '
-            #           f'MAE: {current_metrics["val"]["mae"]:.4f}, '
-            #           f'MAPE: {current_metrics["val"]["mape"]:.4f} {Colors.BRAIN}{Colors.ENDC}')
-            #     print(progress_bar.update(val_loss))
-            #     print()  # Add empty line for readability
+        except Exception as e:
+            print(f"{Colors.RED}Error preparing data: {str(e)}{Colors.CROSS}{Colors.ENDC}")
+            raise
 
-            if early_stopping.early_stop:
-                print(f"Early stopping triggered after {epoch+1} epochs")
-                break
+    def train_dataloader(self):
+        return DataLoader(
+            self.train_dataset,
+            batch_size=self.batch_size,
+            shuffle=True,
+            num_workers=4,
+            pin_memory=True
+        )
 
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
+    def val_dataloader(self):
+        return DataLoader(
+            self.val_dataset,
+            batch_size=self.batch_size,
+            num_workers=4,
+            pin_memory=True
+        )
 
-        Plotter.plot_metrics(history['train'], history['val'], ['MSE', 'MAE', 'MAPE'], dataset_name)
-        
-        return history
+    def test_dataloader(self):
+        return DataLoader(
+            self.test_dataset,
+            batch_size=self.batch_size,
+            num_workers=4,
+            pin_memory=True
+        )
 
-    def validate(self, model_path, test_dataloader):
-        inputs, _ = next(iter(test_dataloader))
-        
-        # Create model for initial metrics (untrained)
-        initial_model = STTRE(
-            inputs.shape, 
-            1, 
-            embed_size=self.model_params['embed_size'],
-            num_layers=self.model_params['num_layers'],
-            forward_expansion=self.model_params['forward_expansion'],
-            heads=self.model_params['heads']
-        ).to(self.device)
-        
-        # Create model for final metrics (trained)
-        trained_model = STTRE(
-            inputs.shape, 
-            1, 
-            embed_size=self.model_params['embed_size'],
-            num_layers=self.model_params['num_layers'],
-            forward_expansion=self.model_params['forward_expansion'],
-            heads=self.model_params['heads']
-        ).to(self.device)
-        
-        # Load trained weights
-        trained_model.load_state_dict(torch.load(model_path, weights_only=True))
-        trained_model.eval()
-
-        metrics = {
-            'mse': MeanSquaredError().to(self.device),
-            'mae': MeanAbsoluteError().to(self.device),
-            'mape': MeanAbsolutePercentageError().to(self.device)
-        }
-
-        # Capture initial metrics with untrained model
-        initial_metrics = {}
-        with torch.no_grad():
-            for inputs, labels in test_dataloader:
-                inputs, labels = inputs.to(self.device), labels.to(self.device)
-                outputs = initial_model(inputs, 0)
-                
-                for name, metric in metrics.items():
-                    metric.update(outputs, labels)
-                
-            for name, metric in metrics.items():
-                initial_metrics[name] = metric.compute().item()
-                metric.reset()
-        
-        # Perform validation with trained model
-        with torch.no_grad():
-            for inputs, labels in test_dataloader:
-                inputs, labels = inputs.to(self.device), labels.to(self.device)
-                outputs = trained_model(inputs, 0)
-                
-                for metric in metrics.values():
-                    metric.update(outputs, labels)
-
-        results = {name: metric.compute().item() for name, metric in metrics.items()}
-        return results, initial_metrics
-
-def format_validation_results(results, initial_metrics):
-    """Creates a pretty formatted string for validation results"""
-    # Header
-    output = [
-        f"\n{Colors.BOLD_BLUE}{'='*60}{Colors.ENDC}",
-        f"{Colors.BOLD_BLUE}{'Final Validation Results':^60}{Colors.ENDC}",
-        f"{Colors.BOLD_BLUE}{'='*60}{Colors.ENDC}\n"
-    ]
-    
-    # Metrics with their corresponding emojis and descriptions
-    metrics_info = {
-        'mse': ('MSE', '📊', 'Mean Squared Error'),
-        'mae': ('MAE', '📏', 'Mean Absolute Error'),
-        'mape': ('MAPE', '📈', 'Mean Absolute Percentage Error')
-    }
-    
-    # Add each metric with formatting
-    for metric, (short_name, emoji, full_name) in metrics_info.items():
-        final_value = results[metric]
-        initial_value = initial_metrics[metric]
-        
-        # Calculate improvement percentage
-        if initial_value > 0:  # Prevent division by zero
-            improvement = (initial_value - final_value) / initial_value
-            improvement = max(0, min(1, improvement))  # Clamp between 0 and 1
-        else:
-            improvement = 0
-            
-        # Create visual bar based on improvement
-        max_bars = 20
-        bars = '█' * int(improvement * max_bars) + '░' * (max_bars - int(improvement * max_bars))
-        
-        # Calculate percentage improvement
-        percentage = improvement * 100
-        
-        # Color code based on improvement
-        if percentage > 50:
-            value_color = Colors.BOLD_GREEN
-        elif percentage > 25:
-            value_color = Colors.BOLD_BLUE
-        else:
-            value_color = Colors.BOLD_RED
-            
-        output.extend([
-            f"{Colors.CYAN}{emoji} {short_name}:{Colors.ENDC}",
-            f"{Colors.YELLOW}├─ Initial: {initial_value:.6f}{Colors.ENDC}",
-            f"{Colors.YELLOW}├─ Final:   {value_color}{final_value:.6f}{Colors.ENDC}",
-            f"{Colors.GREEN}└─ Improvement: |{bars}| {percentage:.1f}%{Colors.ENDC}\n"
-        ])
-    
-    # Footer
-    output.extend([
-        f"{Colors.BOLD_BLUE}{'='*60}{Colors.ENDC}",
-        f"{Colors.MAGENTA}Analysis completed successfully! {Colors.STAR}{Colors.ENDC}\n"
-    ])
-    
-    return '\n'.join(output)
-
-########################################################################################
-###################################### MAIN ############################################
-########################################################################################
-
-def main(mode='both'):
+def train_sttre(dataset_class, data_path, model_params, train_params):
     """
-    Run the STTRE model in different modes.
+    Train the STTRE model using the specified dataset.
+    
     Args:
-        mode (str): One of 'train', 'validate', or 'both'
+        dataset_class: The dataset class to use (Uber, AirQuality, etc.)
+        data_path: Path to the dataset file (if needed)
+        model_params: Dictionary of model parameters
+        train_params: Dictionary of training parameters
     """
-    if mode not in ['train', 'validate', 'both']:
-        raise ValueError("Mode must be one of: 'train', 'validate', 'both'")
-
     Config.create_directories()
     
-    '''
-    MODEL PARAMETERS
-    
-    [UBER]
-    embed_size: 64
-    heads: 8
-    num_layers: 4
-    forward_expansion: 2
-    dropout: 0.15
-    lr: 0.00005
-    batch_size: 256
-    NUM_EPOCHS: 1000
-    TEST_SPLIT: 0.2
-    '''
+    # Initialize data module
+    data_module = STTREDataModule(
+        dataset_class=dataset_class,
+        data_path=data_path,
+        batch_size=train_params['batch_size'],
+        test_split=train_params.get('test_split', 0.2),
+        val_split=train_params.get('val_split', 0.1)
+    )
+
+    # Setup data module to get input shape
+    data_module.setup()
+    sample_batch = next(iter(data_module.train_dataloader()))
+    input_shape = sample_batch[0].shape
+
+    # Initialize model
+    model = LitSTTRE(
+        input_shape=input_shape,
+        output_size=model_params['output_size'],
+        model_params=model_params,
+        train_params=train_params
+    )
+
+    # Callbacks
+    checkpoint_callback = ModelCheckpoint(
+        monitor='val_loss',
+        dirpath=Config.MODEL_DIR,
+        filename=f'sttre-{dataset_class.__name__.lower()}-' + '{epoch:02d}-{val_loss:.2f}',
+        save_top_k=3,
+        mode='min'
+    )
+
+    early_stopping = EarlyStopping(
+        monitor='val_loss',
+        patience=train_params.get('patience', 20),
+        mode='min'
+    )
+
+    # Logger
+    logger = TensorBoardLogger(
+        save_dir=Config.SAVE_DIR,
+        name=dataset_class.__name__.lower(),
+        default_hp_metric=False
+    )
+
+    # Initialize trainer
+    trainer = L.Trainer(
+        max_epochs=train_params['epochs'],
+        accelerator='auto',
+        devices='auto',
+        logger=logger,
+        callbacks=[checkpoint_callback, early_stopping],
+        gradient_clip_val=train_params.get('gradient_clip', 1.0),
+        precision=train_params.get('precision', 32),
+        accumulate_grad_batches=train_params.get('accumulate_grad_batches', 1)
+    )
+
+    try:
+        # Train the model
+        print(f"\n{Colors.BOLD_GREEN}Starting training for {dataset_class.__name__} dataset {Colors.ROCKET}{Colors.ENDC}")
+        trainer.fit(model, data_module)
+        print(f"{Colors.BOLD_GREEN}Training completed! {Colors.CHECK}{Colors.ENDC}")
+
+        # Test the model
+        print(f"\n{Colors.BOLD_BLUE}Starting testing... {Colors.CHART}{Colors.ENDC}")
+        test_results = trainer.test(model, data_module)
+        print(f"{Colors.BOLD_GREEN}Testing completed! {Colors.CHECK}{Colors.ENDC}")
+
+        return model, trainer, test_results
+
+    except Exception as e:
+        print(f"{Colors.RED}Error during training: {str(e)} {Colors.CROSS}{Colors.ENDC}")
+        raise
+
+if __name__ == "__main__":
+    # Example usage with multiple datasets
     model_params = {
-        'embed_size': 32, # Default: 32
-        'heads': 4, # Default: 4
-        'num_layers': 3, # Default: 3
-        'forward_expansion': 1 # Default: 1
+        'embed_size': 32,
+        'num_layers': 3,
+        'heads': 4,
+        'forward_expansion': 1,
+        'output_size': 1
     }
 
     train_params = {
-        'dropout': 0.2, # Default: 0.2
-        'lr': 0.0001, # Default: 0.0001
-        'batch_size': 512, # Default: 512
-        'NUM_EPOCHS': 1000, # Default: 1000
-        'TEST_SPLIT': 0.3 # Default: 0.3
+        'batch_size': 256,
+        'epochs': 1000,
+        'lr': 0.0001,
+        'dropout': 0.2,
+        'patience': 20,
+        'gradient_clip': 1.0,
+        'precision': 32,
+        'accumulate_grad_batches': 1,
+        'test_split': 0.2,
+        'val_split': 0.1
     }
 
-    trainer = STTRETrainer(model_params, train_params)
-
     datasets = {
-        'Uber': (Uber, os.path.join(Config.DATA_DIR, 'uber_stock.csv')),
         # 'AirQuality': (AirQuality, None),
+        'Uber': (Uber, os.path.join(Config.DATA_DIR, 'uber_stock.csv')),
         # 'IstanbulStock': (IstanbulStock, os.path.join(Config.DATA_DIR, 'istanbul_stock.csv')),
         # 'Traffic': (Traffic, os.path.join(Config.DATA_DIR, 'traffic.csv')),
         # 'AppliancesEnergy1': (AppliancesEnergy1, os.path.join(Config.DATA_DIR, 'appliances_energy1.csv')),
@@ -872,42 +764,18 @@ def main(mode='both'):
     }
 
     for dataset_name, (dataset_class, data_path) in datasets.items():
-        print(f"\n{Colors.BOLD_GREEN}Processing {dataset_name} dataset {Colors.ROCKET}{Colors.ENDC}")
-        train_dataloader, test_dataloader = trainer.prepare_data(dataset_class, data_path)
-        
-        if train_dataloader is None or test_dataloader is None:
-            print(f"Skipping {dataset_name} due to data preparation error")
+        try:
+            print(f"\n{Colors.BOLD_GREEN}Processing {dataset_name} dataset {Colors.ROCKET}{Colors.ENDC}")
+            model, trainer, test_results = train_sttre(
+                dataset_class=dataset_class,
+                data_path=data_path,
+                model_params=model_params,
+                train_params=train_params
+            )
+            print(f"{Colors.BOLD_GREEN}Completed {dataset_name} dataset {Colors.CHECK}{Colors.ENDC}")
+            
+        except Exception as e:
+            print(f"{Colors.RED}Error processing {dataset_name}: {str(e)} {Colors.CROSS}{Colors.ENDC}")
             continue
 
-        try:
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
-
-            # Training phase
-            if mode in ['train', 'both']:
-                print(f"{Colors.MAGENTA}Training {dataset_name}... {Colors.BRAIN}{Colors.ENDC}")
-                history = trainer.train(train_dataloader, test_dataloader, dataset_name)
-                print(f"{Colors.BOLD_GREEN}Completed training on {dataset_name} dataset {Colors.CHECK}{Colors.ENDC}")
-
-            # Validation phase
-            if mode in ['validate', 'both']:
-                print(f"{Colors.MAGENTA}Validating {dataset_name}... {Colors.CHART}{Colors.ENDC}")
-                model_path = os.path.join(Config.MODEL_DIR, f'best_model_{dataset_name}.pth')
-                if not os.path.exists(model_path):
-                    print(f"No trained model found for {dataset_name} at {model_path}")
-                    continue
-                    
-                validation_results, initial_metrics = trainer.validate(model_path, test_dataloader)
-                print(format_validation_results(validation_results, initial_metrics))
-
-        except Exception as e:
-            print(f"{Colors.RED}Error in experiment with dataset {dataset_name}: {str(e)} {Colors.CROSS}{Colors.ENDC}")
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
-
     print(f"\n{Colors.BOLD_GREEN}All experiments completed! {Colors.CHECK}{Colors.ENDC}")
-
-if __name__ == "__main__":
-    # You can change this to 'train', 'validate', or 'both'
-    main(mode='both')
-

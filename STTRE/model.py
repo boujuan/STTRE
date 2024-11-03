@@ -5,6 +5,8 @@ import torch.nn.functional as F
 
 from .encoder import Encoder
 
+torch.set_float32_matmul_precision('medium')
+
 class STTRE(L.LightningModule):
     def __init__(self, input_shape, output_size, embed_size, num_layers, 
                  forward_expansion, heads, learning_rate=1e-3):

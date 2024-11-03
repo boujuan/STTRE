@@ -1,5 +1,8 @@
 from setuptools import setup, find_packages
 
+# pip install -e .
+# python -m STTRE.main
+
 setup(
     name="STTRE",
     version="0.1",
