@@ -588,7 +588,6 @@ class LitSTTRE(L.LightningModule):
 
     def test_step(self, batch, batch_idx):
         if not hasattr(self, 'test_metrics_initialized'):
-            # Initialize test metrics only once
             self.test_mse = MeanSquaredError().to(self.device)
             self.test_mae = MeanAbsoluteError().to(self.device)
             self.test_mape = MeanAbsolutePercentageError().to(self.device)
@@ -598,16 +597,11 @@ class LitSTTRE(L.LightningModule):
         y_hat = self(x)
         test_loss = F.mse_loss(y_hat, y)
         
-        # Update metrics
-        self.test_mse(y_hat, y)
-        self.test_mae(y_hat, y)
-        self.test_mape(y_hat, y)
-        
-        # Log metrics
-        self.log('test_loss', test_loss, on_step=False, on_epoch=True, sync_dist=True)
-        self.log('test_mse', self.test_mse, on_step=False, on_epoch=True, sync_dist=True)
-        self.log('test_mae', self.test_mae, on_step=False, on_epoch=True, sync_dist=True)
-        self.log('test_mape', self.test_mape, on_step=False, on_epoch=True, sync_dist=True)
+        # Log with sync_dist=True
+        self.log('test_loss', test_loss, sync_dist=True)
+        self.log('test_mse', self.test_mse(y_hat, y), sync_dist=True)
+        self.log('test_mae', self.test_mae(y_hat, y), sync_dist=True)
+        self.log('test_mape', self.test_mape(y_hat, y), sync_dist=True)
         
         return test_loss
 
@@ -701,7 +695,8 @@ class STTREDataModule(L.LightningDataModule):
             self.test_dataset,
             batch_size=self.batch_size,
             num_workers=4,
-            pin_memory=True
+            pin_memory=True,
+            persistent_workers=True
         )
 
 def train_sttre(dataset_class, data_path, model_params, train_params):
@@ -796,12 +791,17 @@ def train_sttre(dataset_class, data_path, model_params, train_params):
             devices=[0],
             logger=logger,
             enable_progress_bar=True,
-            strategy='auto'  # Changed from None to 'auto'
+            strategy='auto',
+            max_epochs=1,
+            num_sanity_val_steps=0
         )
         
-        # Move model to CPU first to avoid device conflicts
-        model = model.cpu()
-        model = model.to('cuda:0')
+        # Load model from best checkpoint
+        best_model_path = checkpoint_callback.best_model_path
+        if best_model_path:
+            model = LitSTTRE.load_from_checkpoint(best_model_path)
+
+        model = model.cuda()  # Move to GPU directly
         test_results = test_trainer.test(model, datamodule=data_module, verbose=True)
         print(f"{Colors.BOLD_GREEN}Testing completed! {Colors.CHECK}{Colors.ENDC}")
 
@@ -816,8 +816,61 @@ def train_sttre(dataset_class, data_path, model_params, train_params):
         if train_trainer.world_size > 1:
             torch.distributed.destroy_process_group()
 
+def test_sttre(dataset_class, data_path, model_params, train_params, checkpoint_path):
+    """
+    Test the STTRE model using a saved checkpoint.
+    """
+    Config.create_directories()
+    
+    # Initialize data module
+    data_module = STTREDataModule(
+        dataset_class=dataset_class,
+        data_path=data_path,
+        batch_size=train_params['batch_size'],
+        test_split=train_params.get('test_split', 0.2),
+        val_split=train_params.get('val_split', 0.1)
+    )
+
+    # Setup data module to get input shape
+    data_module.setup()
+    sample_batch = next(iter(data_module.train_dataloader()))
+    input_shape = sample_batch[0].shape
+
+    # Logger
+    logger = TensorBoardLogger(
+        save_dir=Config.SAVE_DIR,
+        name=dataset_class.__name__.lower(),
+        default_hp_metric=False
+    )
+
+    # Load model from checkpoint
+    model = LitSTTRE.load_from_checkpoint(
+        checkpoint_path,
+        input_shape=input_shape,
+        output_size=model_params['output_size'],
+        model_params=model_params,
+        train_params=train_params
+    )
+
+    # Testing trainer
+    test_trainer = L.Trainer(
+        accelerator='gpu',
+        devices=[0],
+        logger=logger,
+        enable_progress_bar=True,
+        strategy='auto'
+    )
+
+    # Move model to GPU and test
+    model = model.cuda()
+    test_results = test_trainer.test(model, datamodule=data_module, verbose=True)
+    print(f"{Colors.BOLD_GREEN}Testing completed! {Colors.CHECK}{Colors.ENDC}")
+
+    return model, test_results
+
 if __name__ == "__main__":
-    # Example usage with multiple datasets
+    checkpoint_path = os.path.join(Config.MODEL_DIR, 'sttre-uber-epoch=519-val_loss=6.46.ckpt')
+    
     model_params = {
         'embed_size': 32,
         'num_layers': 3,
@@ -853,6 +906,16 @@ if __name__ == "__main__":
         try:
             model, trainer, test_results = train_sttre(dataset_class, data_path, model_params, train_params)
             print(f"{Colors.BOLD_GREEN}Completed {dataset_name} dataset {Colors.CHECK}{Colors.ENDC}")
+            
+            # model, test_results = test_sttre(
+            #     dataset_class, 
+            #     data_path, 
+            #     model_params, 
+            #     train_params,
+            #     checkpoint_path
+            # )
+            # print(f"{Colors.BOLD_GREEN}Completed testing {dataset_name} dataset {Colors.CHECK}{Colors.ENDC}")
+
             
         except Exception as e:
             print(f"{Colors.RED}Error processing {dataset_name}: {str(e)} {Colors.CROSS}{Colors.ENDC}")
