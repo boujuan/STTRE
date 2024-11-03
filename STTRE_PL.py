@@ -7,6 +7,7 @@
 # - Use better logging (wandb/neptune/comet/clearml/mlflow) ✅
 # - Try other datasets from original paper
 # - Add my dataset
+# - Integrate preprocessing codebase with model codebase with my dataset.
 # - Add automatic hyperparameter tuning (Population Based Training)
 # - Add decoder
 # - Add dataloader for multiple datasets
@@ -21,7 +22,7 @@ from datetime import datetime
 
 import numpy as np
 import polars as pl
-import seaborn as sns
+import seaborn as sns # Used for Plotter class
 
 import torch
 from torch import nn
