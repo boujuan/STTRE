@@ -1,4 +1,4 @@
 #!/bin/bash
 source ~/.bashrc
 mamba activate sttre
-python run.py
+torchrun --nproc_per_node=4 ~/STTRE/_Old/STTRE_PL.py

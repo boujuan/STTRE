@@ -349,12 +349,14 @@ class SelfAttention(nn.Module):
             QE = self._mask_positions(QE)
             S = self._skew(QE).contiguous().view(N, self.heads, self.seq_len, self.seq_len)
             qk = torch.einsum("nqhd,nkhd->nhqk", [queries, keys])
+            # Create mask on the same device as input tensor
             mask = torch.triu(torch.ones(1, self.seq_len, self.seq_len, device=x.device), 1)
             if mask is not None:
                 qk = qk.masked_fill(mask == 0, float("-1e20"))
             attention = torch.softmax(qk / (self.embed_size ** (1/2)), dim=3) + S
         else:
             qk = torch.einsum("nqhd,nkhd->nhqk", [queries, keys])
+            # Create mask on the same device as input tensor
             mask = torch.triu(torch.ones(1, self.seq_len, self.seq_len, device=x.device), 1)
             if mask is not None:
                 qk = qk.masked_fill(mask == 0, float("-1e20"))
@@ -370,6 +372,7 @@ class SelfAttention(nn.Module):
 
     def _mask_positions(self, qe):
         L = qe.shape[-1]
+        # Create mask on the same device as input tensor
         mask = torch.triu(torch.ones(L, L, device=qe.device), 1).flip(1)
         return qe.masked_fill((mask == 1), 0)
 
@@ -500,6 +503,9 @@ class LitSTTRE(L.LightningModule):
         self.test_mae = None
         self.test_mape = None
         
+        # Add this to control progress bar behavior
+        self.log_dict = {}
+        
     def forward(self, x):
         batch_size = len(x)
         
@@ -547,7 +553,7 @@ class LitSTTRE(L.LightningModule):
         self.training_history['train']['MAE'].append(self.train_mae.compute().item())
         self.training_history['train']['MAPE'].append(self.train_mape.compute().item())
         
-        # Log metrics with sync_dist=True
+        # Log metrics individually (not using log_dict)
         self.log('train_loss', loss, prog_bar=True, sync_dist=True)
         self.log('train_mse', self.train_mse, prog_bar=True, sync_dist=True)
         self.log('train_mae', self.train_mae, prog_bar=True, sync_dist=True)
@@ -588,20 +594,15 @@ class LitSTTRE(L.LightningModule):
         y_hat = self(x)
         test_loss = F.mse_loss(y_hat, y)
         
-        # Update metrics
-        self.test_mse = MeanSquaredError().to(self.device)
-        self.test_mae = MeanAbsoluteError().to(self.device)
-        self.test_mape = MeanAbsolutePercentageError().to(self.device)
-        
+        # Update and log metrics with sync_dist=True
         self.test_mse(y_hat, y)
         self.test_mae(y_hat, y)
         self.test_mape(y_hat, y)
         
-        # Log metrics
-        self.log('test_loss', test_loss, prog_bar=True, sync_dist=True)
-        self.log('test_mse', self.test_mse, prog_bar=True, sync_dist=True)
-        self.log('test_mae', self.test_mae, prog_bar=True, sync_dist=True)
-        self.log('test_mape', self.test_mape, prog_bar=True, sync_dist=True)
+        self.log('test_loss', test_loss, prog_bar=True, sync_dist=True, on_epoch=True)
+        self.log('test_mse', self.test_mse, prog_bar=True, sync_dist=True, on_epoch=True)
+        self.log('test_mae', self.test_mae, prog_bar=True, sync_dist=True, on_epoch=True)
+        self.log('test_mape', self.test_mape, prog_bar=True, sync_dist=True, on_epoch=True)
         
         return test_loss
 
@@ -754,36 +755,75 @@ def train_sttre(dataset_class, data_path, model_params, train_params):
         default_hp_metric=False
     )
 
-    # Initialize trainer
-    trainer = L.Trainer(
+    # Training trainer
+    train_trainer = L.Trainer(
         max_epochs=train_params['epochs'],
         accelerator='auto',
         devices='auto',
-        strategy='ddp_find_unused_parameters_true',  # Add this line
+        strategy='ddp_find_unused_parameters_true',
         logger=logger,
         callbacks=[checkpoint_callback, early_stopping],
         gradient_clip_val=train_params.get('gradient_clip', 1.0),
         precision=train_params.get('precision', 32),
         accumulate_grad_batches=train_params.get('accumulate_grad_batches', 1),
-        log_every_n_steps=1  # Add this line to address logging warning
+        log_every_n_steps=1,
+        enable_progress_bar=True
+    )
+
+    # Testing trainer (single device)
+    test_trainer = L.Trainer(
+        accelerator='auto',
+        devices=1,
+        num_nodes=1,
+        logger=logger
     )
 
     try:
-        # Train the model
-        print(f"\n{Colors.BOLD_GREEN}Starting training for {dataset_class.__name__} dataset {Colors.ROCKET}{Colors.ENDC}")
-        trainer.fit(model, data_module)
-        print(f"{Colors.BOLD_GREEN}Training completed! {Colors.CHECK}{Colors.ENDC}")
-
-        # Test the model
-        print(f"\n{Colors.BOLD_BLUE}Starting testing... {Colors.CHART}{Colors.ENDC}")
-        test_results = trainer.test(model, data_module)
-        print(f"{Colors.BOLD_GREEN}Testing completed! {Colors.CHECK}{Colors.ENDC}")
-
-        return model, trainer, test_results
+        # Only print from rank 0 (main process)
+        if train_trainer.global_rank == 0:
+            print(f"\n{Colors.BOLD_GREEN}Starting training for {dataset_class.__name__} dataset {Colors.ROCKET}{Colors.ENDC}")
+        
+        train_trainer.fit(model, data_module)
+        
+        if train_trainer.global_rank == 0:
+            print(f"{Colors.BOLD_GREEN}Training completed! {Colors.CHECK}{Colors.ENDC}")
+            print(f"\n{Colors.BOLD_BLUE}Starting testing... {Colors.CHART}{Colors.ENDC}")
+        
+        # Ensure all processes are synchronized before testing
+        if train_trainer.world_size > 1:
+            torch.distributed.barrier()
+        
+        # Only run testing on rank 0
+        test_results = None
+        if train_trainer.global_rank == 0:
+            test_trainer = L.Trainer(
+                accelerator='auto',
+                devices=1,
+                num_nodes=1,
+                logger=logger,
+                enable_progress_bar=True
+            )
+            test_results = test_trainer.test(model, data_module)
+            print(f"{Colors.BOLD_GREEN}Testing completed! {Colors.CHECK}{Colors.ENDC}")
+        
+        # Ensure all processes are synchronized before returning
+        if train_trainer.world_size > 1:
+            torch.distributed.barrier()
+            
+        return model, train_trainer, test_results
 
     except Exception as e:
-        print(f"{Colors.RED}Error during training: {str(e)} {Colors.CROSS}{Colors.ENDC}")
+        if train_trainer.global_rank == 0:
+            print(f"{Colors.RED}Error during training: {str(e)} {Colors.CROSS}{Colors.ENDC}")
+        # Clean up distributed processes
+        if train_trainer.world_size > 1:
+            torch.distributed.destroy_process_group()
         raise
+
+    finally:
+        # Clean up distributed processes
+        if train_trainer.world_size > 1:
+            torch.distributed.destroy_process_group()
 
 if __name__ == "__main__":
     # Example usage with multiple datasets
@@ -817,19 +857,21 @@ if __name__ == "__main__":
         # 'AppliancesEnergy2': (AppliancesEnergy2, os.path.join(Config.DATA_DIR, 'appliances_energy2.csv'))
     }
 
+    trainer = None
     for dataset_name, (dataset_class, data_path) in datasets.items():
         try:
-            print(f"\n{Colors.BOLD_GREEN}Processing {dataset_name} dataset {Colors.ROCKET}{Colors.ENDC}")
-            model, trainer, test_results = train_sttre(
-                dataset_class=dataset_class,
-                data_path=data_path,
-                model_params=model_params,
-                train_params=train_params
-            )
-            print(f"{Colors.BOLD_GREEN}Completed {dataset_name} dataset {Colors.CHECK}{Colors.ENDC}")
-            
+            model, trainer, test_results = train_sttre(dataset_class, data_path, model_params, train_params)
         except Exception as e:
-            print(f"{Colors.RED}Error processing {dataset_name}: {str(e)} {Colors.CROSS}{Colors.ENDC}")
+            if not hasattr(trainer, 'global_rank') or trainer.global_rank == 0:
+                print(f"{Colors.RED}Error processing {dataset_name}: {str(e)} {Colors.CROSS}{Colors.ENDC}")
             continue
+        finally:
+            # Ensure cleanup happens even if there's an error
+            if trainer and hasattr(trainer, 'world_size') and trainer.world_size > 1:
+                try:
+                    torch.distributed.destroy_process_group()
+                except:
+                    pass
 
-    print(f"\n{Colors.BOLD_GREEN}All experiments completed! {Colors.CHECK}{Colors.ENDC}")
+    if not hasattr(trainer, 'global_rank') or trainer.global_rank == 0:
+        print(f"\n{Colors.BOLD_GREEN}All experiments completed! {Colors.CHECK}{Colors.ENDC}")
