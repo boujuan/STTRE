@@ -2,37 +2,38 @@
 # coding: utf-8
 
 # TODO:
-# - Add my dataset
 # - Turn into pytorch lightning for easier parallelization ✅
-# - Add decoder
 # - Add parallelization (DistributedDataParallel) ✅
-# - Add dataloader for multiple datasets
+# - Use better logging (wandb/neptune/comet/clearml/mlflow) ✅
+# - Add my dataset
 # - Add automatic hyperparameter tuning (Population Based Training)
+# - Add decoder
+# - Add dataloader for multiple datasets
 
 import warnings
 import os
+import sys
+from pathlib import Path
+from datetime import datetime
+
 import numpy as np
+import polars as pl
+import seaborn as sns
+
 import torch
 from torch import nn
 import torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader
+from torchmetrics import MeanSquaredError, MeanAbsolutePercentageError, MeanAbsoluteError
+
 import lightning as L
 from lightning.pytorch.callbacks import ModelCheckpoint, EarlyStopping, RichProgressBar
 from lightning.pytorch.loggers import WandbLogger
-import wandb
 from lightning.pytorch.callbacks.progress.rich_progress import RichProgressBarTheme
-import matplotlib
-matplotlib.use('Agg')
-import matplotlib.pyplot as plt
-from pathlib import Path
-import seaborn as sns
-import polars as pl
-import sys
-from torchmetrics import MeanSquaredError, MeanAbsolutePercentageError, MeanAbsoluteError
-from datetime import datetime
+
+import wandb
 
 warnings.filterwarnings('ignore', category=UserWarning, module='pandas.core.computation.expressions')
-
 torch.set_float32_matmul_precision('medium')
 
 class Colors:
@@ -124,11 +125,6 @@ class Plotter:
         sns.set_style("whitegrid")
         sns.set_context("paper", font_scale=1.5)
         
-        if not hasattr(Plotter.plot_metrics, 'fig'):
-            Plotter.plot_metrics.fig, Plotter.plot_metrics.axes = plt.subplots(1, len(metric_names), 
-                                                                             figsize=(20, 7), 
-                                                                             dpi=300)
-        
         all_data = []
         for metric_name in metric_names:
             # Ensure train and val metrics have the same length
@@ -157,32 +153,27 @@ class Plotter:
         
         try:
             df = pl.concat(all_data)
+            metric_data_pd = df.to_pandas()
             
-            for i, metric_name in enumerate(metric_names):
-                ax = Plotter.plot_metrics.axes[i] if len(metric_names) > 1 else Plotter.plot_metrics.axes
-                ax.clear()
-                
-                metric_data = df.filter(pl.col('Metric') == metric_name)
-                
-                # Convert to pandas for seaborn compatibility
-                metric_data_pd = metric_data.to_pandas()
-                
-                sns.lineplot(data=metric_data_pd, x='Epoch', y='Value', hue='Type', 
-                           ax=ax,
-                           palette=['#2ecc71', '#e74c3c'],
-                           linewidth=2.5)
-                
-                ax.set_title(metric_name, pad=20, fontsize=16, fontweight='bold')
-                ax.set_xlabel('Epoch', fontsize=12)
-                ax.set_ylabel(metric_name, fontsize=12)
-                ax.legend(title=None, fontsize=10)
-                ax.tick_params(axis='both', which='major', labelsize=10)
+            # Create FacetGrid
+            g = sns.FacetGrid(metric_data_pd, col='Metric', col_wrap=len(metric_names), 
+                            height=7, aspect=1.5)
             
-            Plotter.plot_metrics.fig.tight_layout(pad=3.0)
-            Plotter.plot_metrics.fig.savefig(os.path.join(Config.PLOT_DIR, f'{dataset}_metrics_latest.png'), 
-                                           bbox_inches='tight',
-                                           facecolor='white',
-                                           edgecolor='none')
+            # Draw the lines
+            g.map_dataframe(sns.lineplot, x='Epoch', y='Value', hue='Type',
+                          palette=['#2ecc71', '#e74c3c'], linewidth=2.5)
+            
+            # Customize titles and labels
+            g.set_titles(col_template="{col_name}", size=16, weight='bold', pad=20)
+            g.set_axis_labels("Epoch", "Value", size=12)
+            g.add_legend(title=None, fontsize=10)
+            
+            # Save the plot
+            g.savefig(os.path.join(Config.PLOT_DIR, f'{dataset}_metrics_latest.png'),
+                     bbox_inches='tight',
+                     facecolor='white',
+                     edgecolor='none',
+                     dpi=300)
             
         except Exception as e:
             print(f"Error in plotting: {str(e)}")
@@ -433,6 +424,7 @@ class Encoder(nn.Module):
 class LitSTTRE(L.LightningModule):
     def __init__(self, input_shape, output_size, model_params, train_params):
         super().__init__()
+        self.automatic_optimization = True  # Enable automatic optimization
         self.save_hyperparameters()
         self.batch_size, self.num_var, self.seq_len = input_shape
         self.num_elements = self.seq_len * self.num_var
@@ -508,6 +500,9 @@ class LitSTTRE(L.LightningModule):
         # Track whether metrics have been updated
         self.metrics_updated = False
 
+        # Enable gradient checkpointing
+        self.gradient_checkpointing = True
+
     def forward(self, x):
         batch_size = len(x)
         
@@ -541,23 +536,17 @@ class LitSTTRE(L.LightningModule):
         return out
 
     def training_step(self, batch, batch_idx):
+        # Clear cache if memory usage is high
+        if torch.cuda.is_available() and torch.cuda.memory_allocated() > 0.8 * torch.cuda.get_device_properties(0).total_memory:
+            torch.cuda.empty_cache()
+            
         x, y = batch
         y_hat = self(x)
         loss = F.mse_loss(y_hat, y)
         
-        # Update metrics
-        self.train_mse(y_hat, y)
-        self.train_mae(y_hat, y)
-        self.train_mape(y_hat, y)
-        self.metrics_updated = True
-        
-        # Log metrics to wandb
-        self.log_dict({
-            'train/loss': loss,
-            'train/mse': self.train_mse,
-            'train/mae': self.train_mae,
-            'train/mape': self.train_mape,
-        }, prog_bar=True, sync_dist=True)
+        # Free memory
+        del x, y_hat
+        torch.cuda.empty_cache()
         
         return loss
 
@@ -602,40 +591,36 @@ class LitSTTRE(L.LightningModule):
 
     def on_train_epoch_end(self):
         """Called at the end of each training epoch"""
-        # Only update history if metrics have been computed
-        if not self.metrics_updated:
-            return
-            
-        # Get current metrics
-        metrics = {
-            'train': {
-                'MSE': float(self.trainer.callback_metrics.get('train_mse', 0)),
-                'MAE': float(self.trainer.callback_metrics.get('train_mae', 0)),
-                'MAPE': float(self.trainer.callback_metrics.get('train_mape', 0))
-            },
-            'val': {
-                'MSE': float(self.trainer.callback_metrics.get('val_mse', 0)),
-                'MAE': float(self.trainer.callback_metrics.get('val_mae', 0)),
-                'MAPE': float(self.trainer.callback_metrics.get('val_mape', 0))
+        if self.metrics_updated:
+            # Update history with current metrics
+            metrics = {
+                'train': {
+                    'MSE': float(self.train_mse.compute()),
+                    'MAE': float(self.train_mae.compute()),
+                    'MAPE': float(self.train_mape.compute())
+                },
+                'val': {
+                    'MSE': float(self.val_mse.compute()),
+                    'MAE': float(self.val_mae.compute()),
+                    'MAPE': float(self.val_mape.compute())
+                }
             }
-        }
-        
-        # Update history
-        for split in ['train', 'val']:
-            for metric in ['MSE', 'MAE', 'MAPE']:
-                self.training_history[split][metric].append(metrics[split][metric])
-        
-        try:
-            # Plot metrics at the end of each epoch
-            Plotter.plot_metrics(
-                self.training_history['train'],
-                self.training_history['val'],
-                ['MSE', 'MAE', 'MAPE'],
-                self.trainer.logger.name
-            )
-        except Exception as e:
-            print(f"Warning: Could not plot metrics: {str(e)}")
-            pass
+            
+            # Update history
+            for split in ['train', 'val']:
+                for metric in ['MSE', 'MAE', 'MAPE']:
+                    self.training_history[split][metric].append(metrics[split][metric])
+            
+            # Clear metrics
+            self.train_mse.reset()
+            self.train_mae.reset()
+            self.train_mape.reset()
+            self.val_mse.reset()
+            self.val_mae.reset()
+            self.val_mape.reset()
+            
+        # Clear cache
+        torch.cuda.empty_cache()
 
     def on_train_epoch_start(self):
         """Reset metrics at the start of each epoch"""
@@ -673,7 +658,10 @@ class STTREDataModule(L.LightningDataModule):
         self.batch_size = batch_size
         self.test_split = test_split
         self.val_split = val_split
-
+        self.num_workers = min(4, os.cpu_count() // 2)  # Dynamically set workers
+        self.persistent_workers = True
+        self.pin_memory = torch.cuda.is_available()  # Only pin if CUDA available
+        
     def setup(self, stage=None):
         try:
             # Create full dataset
@@ -709,25 +697,29 @@ class STTREDataModule(L.LightningDataModule):
             self.train_dataset,
             batch_size=self.batch_size,
             shuffle=True,
-            num_workers=4,
-            pin_memory=True
+            num_workers=self.num_workers,
+            pin_memory=self.pin_memory,
+            persistent_workers=self.persistent_workers,
+            prefetch_factor=2,  # Reduce prefetching
+            drop_last=True  # Drop incomplete batches
         )
 
     def val_dataloader(self):
         return DataLoader(
             self.val_dataset,
             batch_size=self.batch_size,
-            num_workers=4,
-            pin_memory=True
+            num_workers=self.num_workers,
+            pin_memory=True,
+            persistent_workers=self.persistent_workers
         )
 
     def test_dataloader(self):
         return DataLoader(
             self.test_dataset,
             batch_size=self.batch_size,
-            num_workers=4,
+            num_workers=self.num_workers,
             pin_memory=True,
-            persistent_workers=True
+            persistent_workers=self.persistent_workers
         )
 
 def cleanup_old_checkpoints(model_dir, dataset_name, keep_top_k=3):
@@ -743,6 +735,8 @@ def cleanup_old_checkpoints(model_dir, dataset_name, keep_top_k=3):
 def train_sttre(dataset_class, data_path, model_params, train_params):
     """Train the STTRE model using the specified dataset."""
     try:
+        cleanup_memory()  # Clean before training
+        
         Config.create_directories()
         
         # Create a descriptive run name
@@ -806,9 +800,11 @@ def train_sttre(dataset_class, data_path, model_params, train_params):
             ModelCheckpoint(
                 monitor='val/loss',
                 dirpath=Config.MODEL_DIR,
-                filename=f'sttre-{dataset_class.__name__.lower()}-' + '{epoch:02d}-{val/loss:.2f}',
+                filename=f'sttre-{dataset_class.__name__.lower()}-' + '{epoch:02d}-{val_loss:.2f}',
                 save_top_k=3,
-                mode='min'
+                mode='min',
+                save_last=False,  # Don't save last checkpoint
+                auto_insert_metric_name=False  # Prevent duplicate metric names in filename
             ),
             EarlyStopping(
                 monitor='val/loss',
@@ -829,7 +825,9 @@ def train_sttre(dataset_class, data_path, model_params, train_params):
             precision=train_params.get('precision', 32),
             accumulate_grad_batches=train_params.get('accumulate_grad_batches', 1),
             log_every_n_steps=1,
-            enable_progress_bar=True
+            enable_progress_bar=True,
+            reload_dataloaders_every_n_epochs=1,  # Reload dataloaders to prevent memory leaks
+            detect_anomaly=False,  # Disable anomaly detection for better performance
         )
 
         print(f"\n{Colors.BOLD_GREEN}Starting training for {dataset_class.__name__} dataset {Colors.ROCKET}{Colors.ENDC}")
@@ -846,7 +844,7 @@ def train_sttre(dataset_class, data_path, model_params, train_params):
         print(f"{Colors.RED}Error during training: {str(e)} {Colors.CROSS}{Colors.ENDC}")
         raise
     finally:
-        # Make sure to close wandb run in all cases
+        cleanup_memory()  # Clean after training
         wandb.finish()
 
 def test_sttre(dataset_class, data_path, model_params, train_params, checkpoint_path):
@@ -877,12 +875,20 @@ def test_sttre(dataset_class, data_path, model_params, train_params, checkpoint_
         model_params=model_params,
         train_params=train_params
     )
+    
+    # Initialize wandb logger for testing
+    wandb_logger = WandbLogger(
+        project="STTRE",
+        name=f"test_{dataset_class.__name__}",
+        log_model=False,
+        save_dir=Config.SAVE_DIR
+    )
 
     # Testing trainer
     test_trainer = L.Trainer(
         accelerator='gpu',
         devices=[0],
-        logger=logger,
+        logger=wandb_logger,
         enable_progress_bar=True,
         strategy='auto'
     )
@@ -893,6 +899,14 @@ def test_sttre(dataset_class, data_path, model_params, train_params, checkpoint_
     print(f"{Colors.BOLD_GREEN}Testing completed! {Colors.CHECK}{Colors.ENDC}")
 
     return model, test_results
+
+def cleanup_memory():
+    """Utility function to clean up memory"""
+    import gc
+    gc.collect()
+    torch.cuda.empty_cache()
+    if torch.cuda.is_available():
+        torch.cuda.reset_peak_memory_stats()
 
 if __name__ == "__main__":
     # Initialize wandb
@@ -933,6 +947,11 @@ if __name__ == "__main__":
     trainer = None
     for dataset_name, (dataset_class, data_path) in datasets.items():
         try:
+            # Add memory cleanup before each dataset
+            torch.cuda.empty_cache()
+            if torch.cuda.is_available():
+                torch.cuda.reset_peak_memory_stats()
+            
             model, trainer, test_results = train_sttre(dataset_class, data_path, model_params, train_params)
             print(f"{Colors.BOLD_GREEN}Completed {dataset_name} dataset {Colors.CHECK}{Colors.ENDC}")
             
@@ -944,10 +963,15 @@ if __name__ == "__main__":
             #     checkpoint_path
             # )
             # print(f"{Colors.BOLD_GREEN}Completed testing {dataset_name} dataset {Colors.CHECK}{Colors.ENDC}")
-
+            
+            # Cleanup after training
+            del model, trainer
+            torch.cuda.empty_cache()
             
         except Exception as e:
             print(f"{Colors.RED}Error processing {dataset_name}: {str(e)} {Colors.CROSS}{Colors.ENDC}")
+            # Cleanup on error
+            torch.cuda.empty_cache()
             continue
 
     print(f"\n{Colors.BOLD_GREEN}All experiments completed! {Colors.CHECK}{Colors.ENDC}")
