@@ -699,6 +699,16 @@ class STTREDataModule(L.LightningDataModule):
             persistent_workers=True
         )
 
+def cleanup_old_checkpoints(model_dir, dataset_name, keep_top_k=3):
+    """Clean up old checkpoints, keeping only the top k best models."""
+    checkpoints = [f for f in os.listdir(model_dir) if f.startswith(f'sttre-{dataset_name.lower()}-') and f.endswith('.ckpt')]
+    if len(checkpoints) > keep_top_k:
+        # Sort checkpoints by validation loss (extracted from filename)
+        checkpoints.sort(key=lambda x: float(x.split('val_loss=')[1].split('.ckpt')[0]))
+        # Remove all but the top k checkpoints
+        for checkpoint in checkpoints[keep_top_k:]:
+            os.remove(os.path.join(model_dir, checkpoint))
+
 def train_sttre(dataset_class, data_path, model_params, train_params):
     """
     Train the STTRE model using the specified dataset.
@@ -747,6 +757,9 @@ def train_sttre(dataset_class, data_path, model_params, train_params):
         patience=train_params.get('patience', 20),
         mode='min'
     )
+
+    # Clean up old checkpoints
+    cleanup_old_checkpoints(Config.MODEL_DIR, dataset_class.__name__, keep_top_k=3)
 
     # Logger
     logger = TensorBoardLogger(
