@@ -18,7 +18,8 @@ import torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader
 import lightning as L
 from lightning.pytorch.callbacks import ModelCheckpoint, EarlyStopping, RichProgressBar
-from lightning.pytorch.loggers import TensorBoardLogger
+from lightning.pytorch.loggers import WandbLogger
+import wandb
 from lightning.pytorch.callbacks.progress.rich_progress import RichProgressBarTheme
 import matplotlib
 matplotlib.use('Agg')
@@ -28,6 +29,7 @@ import seaborn as sns
 import polars as pl
 import sys
 from torchmetrics import MeanSquaredError, MeanAbsolutePercentageError, MeanAbsoluteError
+from datetime import datetime
 
 warnings.filterwarnings('ignore', category=UserWarning, module='pandas.core.computation.expressions')
 
@@ -549,11 +551,13 @@ class LitSTTRE(L.LightningModule):
         self.train_mape(y_hat, y)
         self.metrics_updated = True
         
-        # Log metrics with sync_dist=True for proper multi-GPU logging
-        self.log('train_loss', loss, prog_bar=True, sync_dist=True)
-        self.log('train_mse', self.train_mse, prog_bar=True, sync_dist=True)
-        self.log('train_mae', self.train_mae, prog_bar=True, sync_dist=True)
-        self.log('train_mape', self.train_mape, prog_bar=True, sync_dist=True)
+        # Log metrics to wandb
+        self.log_dict({
+            'train/loss': loss,
+            'train/mse': self.train_mse,
+            'train/mae': self.train_mae,
+            'train/mape': self.train_mape,
+        }, prog_bar=True, sync_dist=True)
         
         return loss
 
@@ -567,11 +571,13 @@ class LitSTTRE(L.LightningModule):
         self.val_mae(y_hat, y)
         self.val_mape(y_hat, y)
         
-        # Log metrics with sync_dist=True
-        self.log('val_loss', val_loss, prog_bar=True, sync_dist=True)
-        self.log('val_mse', self.val_mse, prog_bar=True, sync_dist=True)
-        self.log('val_mae', self.val_mae, prog_bar=True, sync_dist=True)
-        self.log('val_mape', self.val_mape, prog_bar=True, sync_dist=True)
+        # Log metrics to wandb
+        self.log_dict({
+            'val/loss': val_loss,
+            'val/mse': self.val_mse,
+            'val/mae': self.val_mae,
+            'val/mape': self.val_mape,
+        }, prog_bar=True, sync_dist=True)
         
         return val_loss
 
@@ -653,7 +659,9 @@ class LitSTTRE(L.LightningModule):
             "optimizer": optimizer,
             "lr_scheduler": {
                 "scheduler": scheduler,
-                "monitor": "val_loss"
+                "monitor": "val/loss",
+                "interval": "epoch",
+                "frequency": 1
             }
         }
 
@@ -734,80 +742,96 @@ def cleanup_old_checkpoints(model_dir, dataset_name, keep_top_k=3):
 
 def train_sttre(dataset_class, data_path, model_params, train_params):
     """Train the STTRE model using the specified dataset."""
-    Config.create_directories()
-    
-    # Initialize data module
-    data_module = STTREDataModule(
-        dataset_class=dataset_class,
-        data_path=data_path,
-        batch_size=train_params['batch_size']
-    )
-    
-    # Setup data module to get input shape
-    data_module.setup()
-    sample_batch = next(iter(data_module.train_dataloader()))
-    input_shape = sample_batch[0].shape
-    
-    # Initialize model
-    model = LitSTTRE(
-        input_shape=input_shape,
-        output_size=model_params['output_size'],
-        model_params=model_params,
-        train_params=train_params
-    )
-    
-    # Setup callbacks
-    callbacks = [
-        RichProgressBar(
-            theme=RichProgressBarTheme(
-                description="white",
-                progress_bar="#6206E0",
-                progress_bar_finished="#6206E0",
-                progress_bar_pulse="#6206E0",
-                batch_progress="white",
-                time="grey54",
-                processing_speed="grey70",
-                metrics="white"
-            ),
-            leave=True
-        ),
-        ModelCheckpoint(
-            monitor='val_loss',
-            dirpath=Config.MODEL_DIR,
-            filename=f'sttre-{dataset_class.__name__.lower()}-' + '{epoch:02d}-{val_loss:.2f}',
-            save_top_k=3,
-            mode='min'
-        ),
-        EarlyStopping(
-            monitor='val_loss',
-            patience=train_params.get('patience', 20),
-            mode='min'
-        )
-    ]
-    
-    # Logger setup
-    logger = TensorBoardLogger(
-        save_dir=Config.SAVE_DIR,
-        name=dataset_class.__name__.lower(),
-        default_hp_metric=False
-    )
-    
-    # Initialize trainer
-    trainer = L.Trainer(
-        max_epochs=train_params['epochs'],
-        accelerator='auto',
-        devices='auto',
-        strategy='ddp_find_unused_parameters_true',
-        logger=logger,
-        callbacks=callbacks,
-        gradient_clip_val=train_params.get('gradient_clip', 1.0),
-        precision=train_params.get('precision', 32),
-        accumulate_grad_batches=train_params.get('accumulate_grad_batches', 1),
-        log_every_n_steps=1,
-        enable_progress_bar=True
-    )
-
     try:
+        Config.create_directories()
+        
+        # Create a descriptive run name
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        run_name = f"{dataset_class.__name__}_" \
+                  f"e{model_params['embed_size']}_" \
+                  f"l{model_params['num_layers']}_" \
+                  f"h{model_params['heads']}_" \
+                  f"b{train_params['batch_size']}_" \
+                  f"lr{train_params['lr']}_" \
+                  f"{timestamp}"
+        
+        # Initialize wandb logger with detailed run name
+        wandb_logger = WandbLogger(
+            project="STTRE",
+            name=run_name,
+            log_model=True,
+            save_dir=Config.SAVE_DIR,
+            config={
+                "model_params": model_params,
+                "train_params": train_params,
+                "dataset": dataset_class.__name__,
+            }
+        )
+        
+        # Initialize data module
+        data_module = STTREDataModule(
+            dataset_class=dataset_class,
+            data_path=data_path,
+            batch_size=train_params['batch_size']
+        )
+        
+        # Setup data module to get input shape
+        data_module.setup()
+        sample_batch = next(iter(data_module.train_dataloader()))
+        input_shape = sample_batch[0].shape
+        
+        # Initialize model
+        model = LitSTTRE(
+            input_shape=input_shape,
+            output_size=model_params['output_size'],
+            model_params=model_params,
+            train_params=train_params
+        )
+        
+        # Setup callbacks with updated metric names
+        callbacks = [
+            RichProgressBar(
+                theme=RichProgressBarTheme(
+                    description="white",
+                    progress_bar="#6206E0",
+                    progress_bar_finished="#6206E0",
+                    progress_bar_pulse="#6206E0",
+                    batch_progress="white",
+                    time="grey54",
+                    processing_speed="grey70",
+                    metrics="white"
+                ),
+                leave=True
+            ),
+            ModelCheckpoint(
+                monitor='val/loss',
+                dirpath=Config.MODEL_DIR,
+                filename=f'sttre-{dataset_class.__name__.lower()}-' + '{epoch:02d}-{val/loss:.2f}',
+                save_top_k=3,
+                mode='min'
+            ),
+            EarlyStopping(
+                monitor='val/loss',
+                patience=train_params.get('patience', 20),
+                mode='min'
+            )
+        ]
+        
+        # Initialize trainer
+        trainer = L.Trainer(
+            max_epochs=train_params['epochs'],
+            accelerator='auto',
+            devices='auto',
+            strategy='ddp_find_unused_parameters_true',
+            logger=wandb_logger,  # Use wandb logger instead of TensorBoard
+            callbacks=callbacks,
+            gradient_clip_val=train_params.get('gradient_clip', 1.0),
+            precision=train_params.get('precision', 32),
+            accumulate_grad_batches=train_params.get('accumulate_grad_batches', 1),
+            log_every_n_steps=1,
+            enable_progress_bar=True
+        )
+
         print(f"\n{Colors.BOLD_GREEN}Starting training for {dataset_class.__name__} dataset {Colors.ROCKET}{Colors.ENDC}")
         trainer.fit(model, data_module)
         print(f"{Colors.BOLD_GREEN}Training completed! {Colors.CHECK}{Colors.ENDC}")
@@ -821,6 +845,9 @@ def train_sttre(dataset_class, data_path, model_params, train_params):
     except Exception as e:
         print(f"{Colors.RED}Error during training: {str(e)} {Colors.CROSS}{Colors.ENDC}")
         raise
+    finally:
+        # Make sure to close wandb run in all cases
+        wandb.finish()
 
 def test_sttre(dataset_class, data_path, model_params, train_params, checkpoint_path):
     """
@@ -841,13 +868,6 @@ def test_sttre(dataset_class, data_path, model_params, train_params, checkpoint_
     data_module.setup()
     sample_batch = next(iter(data_module.train_dataloader()))
     input_shape = sample_batch[0].shape
-
-    # Logger
-    logger = TensorBoardLogger(
-        save_dir=Config.SAVE_DIR,
-        name=dataset_class.__name__.lower(),
-        default_hp_metric=False
-    )
 
     # Load model from checkpoint
     model = LitSTTRE.load_from_checkpoint(
@@ -875,6 +895,9 @@ def test_sttre(dataset_class, data_path, model_params, train_params, checkpoint_
     return model, test_results
 
 if __name__ == "__main__":
+    # Initialize wandb
+    wandb.login()
+    
     checkpoint_path = os.path.join(Config.MODEL_DIR, 'sttre-uber-epoch=519-val_loss=6.46.ckpt')
     
     model_params = {
