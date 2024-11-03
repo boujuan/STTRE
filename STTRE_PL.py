@@ -9,6 +9,7 @@
 # - Add automatic hyperparameter tuning (Population Based Training)
 # - Add decoder
 # - Add dataloader for multiple datasets
+# - Enable colorful/rich terminal output + Emojis
 
 import warnings
 import os
@@ -35,6 +36,17 @@ import wandb
 
 warnings.filterwarnings('ignore', category=UserWarning, module='pandas.core.computation.expressions')
 torch.set_float32_matmul_precision('medium')
+
+class ThresholdModelCheckpoint(ModelCheckpoint):
+    def __init__(self, loss_threshold=50.0, **kwargs):
+        super().__init__(**kwargs)
+        self.loss_threshold = loss_threshold
+
+    def _should_save_on_train_epoch_end(self, trainer):
+        current_loss = trainer.callback_metrics.get('val/loss')
+        if current_loss is not None and current_loss < self.loss_threshold:
+            return super()._should_save_on_train_epoch_end(trainer)
+        return False
 
 class Colors:
     # Regular colors
@@ -771,13 +783,34 @@ class STTREDataModule(L.LightningDataModule):
 # INFO: General utility functions
 def cleanup_old_checkpoints(model_dir, dataset_name, keep_top_k=3):
     """Clean up old checkpoints, keeping only the top k best models."""
-    checkpoints = [f for f in os.listdir(model_dir) if f.startswith(f'sttre-{dataset_name.lower()}-') and f.endswith('.ckpt')]
-    if len(checkpoints) > keep_top_k:
-        # Sort checkpoints by validation loss (extracted from filename)
-        checkpoints.sort(key=lambda x: float(x.split('val_loss=')[1].split('.ckpt')[0]))
-        # Remove all but the top k checkpoints
-        for checkpoint in checkpoints[keep_top_k:]:
-            os.remove(os.path.join(model_dir, checkpoint))
+    try:
+        checkpoints = [f for f in os.listdir(model_dir) 
+                      if f.startswith(f'sttre-{dataset_name.lower()}-') 
+                      and f.endswith('.ckpt')]
+        
+        if len(checkpoints) > keep_top_k:
+            # Sort checkpoints by validation loss (extracted from filename)
+            checkpoints.sort(key=lambda x: float(x.split('-loss')[1].split('.ckpt')[0]))
+            
+            # Remove all but the top k checkpoints
+            for checkpoint in checkpoints[keep_top_k:]:
+                checkpoint_path = os.path.join(model_dir, checkpoint)
+                try:
+                    os.remove(checkpoint_path)
+                    print(f"{Colors.YELLOW}Removed old checkpoint: {checkpoint}{Colors.ENDC}")
+                except OSError as e:
+                    print(f"{Colors.RED}Error removing checkpoint {checkpoint}: {str(e)}{Colors.ENDC}")
+            
+            print(f"{Colors.GREEN}Kept top {keep_top_k} checkpoints for {dataset_name}{Colors.ENDC}")
+    except Exception as e:
+        print(f"{Colors.RED}Error during checkpoint cleanup: {str(e)}{Colors.ENDC}")
+
+def save_if_below_threshold(trainer, pl_module):
+    # Only save if validation loss is below 50
+    current_loss = trainer.callback_metrics.get('val/loss')
+    if current_loss is not None and current_loss < 50.0:
+        return True
+    return False
 
 def train_sttre(dataset_class, data_path, model_params, train_params):
     """Train the STTRE model using the specified dataset."""
@@ -869,19 +902,23 @@ def train_sttre(dataset_class, data_path, model_params, train_params):
         
         # Add other callbacks for all ranks
         callbacks.extend([
-            ModelCheckpoint(
+            ThresholdModelCheckpoint(
+                loss_threshold=50.0,
                 monitor='val/loss',
                 dirpath=Config.MODEL_DIR,
-                filename=f'sttre-{dataset_class.__name__.lower()}-' + '{epoch:02d}-{val_loss:.2f}',
+                filename=f'sttre-{dataset_class.__name__.lower()}-' + 'epoch{epoch:03d}-loss{val/loss:.4f}',
                 save_top_k=3,
                 mode='min',
-                save_last=False,  # Don't save last checkpoint
-                auto_insert_metric_name=False  # Prevent duplicate metric names in filename
+                save_last=False,
+                auto_insert_metric_name=False
             ),
             EarlyStopping(
                 monitor='val/loss',
                 patience=train_params.get('patience', 20),
-                mode='min'
+                mode='min',
+                min_delta=0.001,
+                check_finite=True,
+                check_on_train_epoch_end=False
             )
         ])
 
@@ -905,6 +942,11 @@ def train_sttre(dataset_class, data_path, model_params, train_params):
 
         # Train the model
         trainer.fit(model, data_module)
+        
+        # Clean up old checkpoints
+        if local_rank == 0:  # Only clean up on rank 0
+            dataset_name = dataset_class.__name__
+            cleanup_old_checkpoints(Config.MODEL_DIR, dataset_name)
         
         # Only print completion message from rank 0
         if local_rank == 0:
@@ -1026,10 +1068,10 @@ if __name__ == "__main__":
     # INFO: MAIN TRAINING PARAMETERS
     train_params = {
         'batch_size': 64,
-        'epochs': 1000,
+        'epochs': 2000,
         'lr': 0.0001,
         'dropout': 0.2,
-        'patience': 20,
+        'patience': 50,
         'gradient_clip': 1.0,
         'precision': '32-true', # 16-mixed enables mixed precision training, 32-true is full precision
         'accumulate_grad_batches': 4,
