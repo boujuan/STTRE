@@ -193,14 +193,24 @@ class BaseDataset(Dataset):
                 except ValueError:
                     continue  # Skip non-numeric rows
         data = np.array(data)
+        
+        # Check if we have enough data points
+        if len(data) <= seq_len + 1:
+            raise ValueError(f"Dataset length ({len(data)}) must be greater than sequence length + 1 ({seq_len + 1})")
+            
         self.X = self.normalize(data[:, :-1])
         self.y = data[:, [-1]]
         self.len = len(self.y)
 
     def __len__(self):
-        return self.len - self.seq_len - 1
+        valid_length = self.len - self.seq_len - 1
+        if valid_length <= 0:
+            raise ValueError(f"No valid sequences can be generated with sequence length {self.seq_len}")
+        return valid_length
 
     def __getitem__(self, idx):
+        if idx >= len(self):
+            raise IndexError("Index out of bounds")
         x = np.transpose(self.X[idx:idx+self.seq_len])
         label = self.y[idx+self.seq_len+1]
         return torch.tensor(x, dtype=torch.float), torch.tensor(label, dtype=torch.float)
@@ -536,17 +546,23 @@ class LitSTTRE(L.LightningModule):
         return out
 
     def training_step(self, batch, batch_idx):
-        # Clear cache if memory usage is high
-        if torch.cuda.is_available() and torch.cuda.memory_allocated() > 0.8 * torch.cuda.get_device_properties(0).total_memory:
-            torch.cuda.empty_cache()
-            
         x, y = batch
         y_hat = self(x)
         loss = F.mse_loss(y_hat, y)
         
-        # Free memory
-        del x, y_hat
-        torch.cuda.empty_cache()
+        # Update metrics
+        self.train_mse(y_hat, y)
+        self.train_mae(y_hat, y)
+        self.train_mape(y_hat, y)
+        self.metrics_updated = True
+        
+        # Log metrics to wandb
+        self.log_dict({
+            'train/loss': loss,
+            'train/mse': self.train_mse,
+            'train/mae': self.train_mae,
+            'train/mape': self.train_mape,
+        }, prog_bar=True, sync_dist=True)
         
         return loss
 
@@ -591,36 +607,37 @@ class LitSTTRE(L.LightningModule):
 
     def on_train_epoch_end(self):
         """Called at the end of each training epoch"""
-        if self.metrics_updated:
+        # Only compute and log metrics if they've been updated
+        if not self.metrics_updated:
+            return
+        
+        try:
             # Update history with current metrics
             metrics = {
                 'train': {
-                    'MSE': float(self.train_mse.compute()),
-                    'MAE': float(self.train_mae.compute()),
-                    'MAPE': float(self.train_mape.compute())
+                    'MSE': self.train_mse,
+                    'MAE': self.train_mae,
+                    'MAPE': self.train_mape
                 },
                 'val': {
-                    'MSE': float(self.val_mse.compute()),
-                    'MAE': float(self.val_mae.compute()),
-                    'MAPE': float(self.val_mape.compute())
+                    'MSE': self.val_mse,
+                    'MAE': self.val_mae,
+                    'MAPE': self.val_mape
                 }
             }
             
             # Update history
             for split in ['train', 'val']:
-                for metric in ['MSE', 'MAE', 'MAPE']:
-                    self.training_history[split][metric].append(metrics[split][metric])
+                for metric_name, metric in metrics[split].items():
+                    if metric.update_called:  # Only compute if metric has been updated
+                        value = float(metric.compute())
+                        self.training_history[split][metric_name].append(value)
+                        metric.reset()
             
-            # Clear metrics
-            self.train_mse.reset()
-            self.train_mae.reset()
-            self.train_mape.reset()
-            self.val_mse.reset()
-            self.val_mae.reset()
-            self.val_mape.reset()
+            self.metrics_updated = False
             
-        # Clear cache
-        torch.cuda.empty_cache()
+        except Exception as e:
+            print(f"Error in on_train_epoch_end: {str(e)}")
 
     def on_train_epoch_start(self):
         """Reset metrics at the start of each epoch"""
@@ -650,6 +667,23 @@ class LitSTTRE(L.LightningModule):
             }
         }
 
+    def on_train_start(self):
+        """Called when training starts"""
+        # Initialize metrics to zero
+        self.train_mse.reset()
+        self.train_mae.reset()
+        self.train_mape.reset()
+        self.val_mse.reset()
+        self.val_mae.reset()
+        self.val_mape.reset()
+        self.metrics_updated = False
+        
+        # Initialize training history
+        self.training_history = {
+            'train': {'MSE': [], 'MAE': [], 'MAPE': []},
+            'val': {'MSE': [], 'MAE': [], 'MAPE': []}
+        }
+
 class STTREDataModule(L.LightningDataModule):
     def __init__(self, dataset_class, data_path, batch_size, test_split=0.2, val_split=0.1):
         super().__init__()
@@ -658,39 +692,48 @@ class STTREDataModule(L.LightningDataModule):
         self.batch_size = batch_size
         self.test_split = test_split
         self.val_split = val_split
-        self.num_workers = min(4, os.cpu_count() // 2)  # Dynamically set workers
+        self.num_workers = min(32, os.cpu_count())  # Dynamically set workers
         self.persistent_workers = True
-        self.pin_memory = torch.cuda.is_available()  # Only pin if CUDA available
+        self.pin_memory = True
         
     def setup(self, stage=None):
-        try:
-            # Create full dataset
-            full_dataset = self.dataset_class(self.data_path)
-            
-            if len(full_dataset) == 0:
-                raise ValueError(f"Dataset is empty after processing. Please check the file: {self.data_path}")
-            
-            # Calculate lengths
-            dataset_size = len(full_dataset)
-            test_size = int(self.test_split * dataset_size)
-            val_size = int(self.val_split * dataset_size)
-            train_size = dataset_size - test_size - val_size
-            
-            # Split dataset
-            self.train_dataset, self.val_dataset, self.test_dataset = torch.utils.data.random_split(
-                full_dataset, 
-                [train_size, val_size, test_size],
-                generator=torch.Generator().manual_seed(42)
-            )
-            
-            print(f"{Colors.BOLD_BLUE}Dataset splits:{Colors.ENDC}")
-            print(f"{Colors.CYAN}Training samples: {train_size}{Colors.ENDC}")
-            print(f"{Colors.YELLOW}Validation samples: {val_size}{Colors.ENDC}")
-            print(f"{Colors.GREEN}Test samples: {test_size}{Colors.ENDC}")
-            
-        except Exception as e:
-            print(f"{Colors.RED}Error preparing data: {str(e)}{Colors.CROSS}{Colors.ENDC}")
-            raise
+        if not hasattr(self, 'train_dataset'):  # Only setup once
+            try:
+                # Create full dataset
+                full_dataset = self.dataset_class(self.data_path)
+                
+                # Validate dataset size
+                if len(full_dataset) < self.batch_size:
+                    raise ValueError(f"Dataset size ({len(full_dataset)}) must be greater than batch size ({self.batch_size})")
+                
+                # Calculate lengths
+                dataset_size = len(full_dataset)
+                test_size = int(self.test_split * dataset_size)
+                val_size = int(self.val_split * dataset_size)
+                train_size = dataset_size - test_size - val_size
+                
+                # Validate split sizes
+                if train_size < self.batch_size or val_size < self.batch_size or test_size < self.batch_size:
+                    raise ValueError(f"Split sizes (train: {train_size}, val: {val_size}, test: {test_size}) must each be greater than batch size ({self.batch_size})")
+                
+                # Create splits with fixed generator
+                generator = torch.Generator().manual_seed(42)
+                self.train_dataset, self.val_dataset, self.test_dataset = torch.utils.data.random_split(
+                    full_dataset, 
+                    [train_size, val_size, test_size],
+                    generator=generator
+                )
+                
+                # Only print once from rank 0
+                if self.trainer and self.trainer.is_global_zero:
+                    print(f"{Colors.BOLD_BLUE}Dataset splits:{Colors.ENDC}")
+                    print(f"{Colors.CYAN}Training samples: {train_size}{Colors.ENDC}")
+                    print(f"{Colors.YELLOW}Validation samples: {val_size}{Colors.ENDC}")
+                    print(f"{Colors.GREEN}Test samples: {test_size}{Colors.ENDC}")
+                
+            except Exception as e:
+                print(f"{Colors.RED}Error preparing data: {str(e)}{Colors.CROSS}{Colors.ENDC}")
+                raise
 
     def train_dataloader(self):
         return DataLoader(
@@ -700,7 +743,7 @@ class STTREDataModule(L.LightningDataModule):
             num_workers=self.num_workers,
             pin_memory=self.pin_memory,
             persistent_workers=self.persistent_workers,
-            prefetch_factor=2,  # Reduce prefetching
+            prefetch_factor=4,  # change prefetching
             drop_last=True  # Drop incomplete batches
         )
 
@@ -709,7 +752,7 @@ class STTREDataModule(L.LightningDataModule):
             self.val_dataset,
             batch_size=self.batch_size,
             num_workers=self.num_workers,
-            pin_memory=True,
+            pin_memory=self.pin_memory,
             persistent_workers=self.persistent_workers
         )
 
@@ -718,7 +761,7 @@ class STTREDataModule(L.LightningDataModule):
             self.test_dataset,
             batch_size=self.batch_size,
             num_workers=self.num_workers,
-            pin_memory=True,
+            pin_memory=self.pin_memory,
             persistent_workers=self.persistent_workers
         )
 
@@ -768,6 +811,17 @@ def train_sttre(dataset_class, data_path, model_params, train_params):
             data_path=data_path,
             batch_size=train_params['batch_size']
         )
+        
+        # Setup and validate data
+        data_module.setup()
+        
+        # Print dataset information
+        print(f"Dataset size: {len(data_module.train_dataset)}")
+        print(f"Batch size: {train_params['batch_size']}")
+        
+        # Validate we have enough data
+        if len(data_module.train_dataset) < train_params['batch_size']:
+            raise ValueError(f"Training dataset size ({len(data_module.train_dataset)}) is smaller than batch size ({train_params['batch_size']})")
         
         # Setup data module to get input shape
         data_module.setup()
@@ -826,8 +880,10 @@ def train_sttre(dataset_class, data_path, model_params, train_params):
             accumulate_grad_batches=train_params.get('accumulate_grad_batches', 1),
             log_every_n_steps=1,
             enable_progress_bar=True,
-            reload_dataloaders_every_n_epochs=1,  # Reload dataloaders to prevent memory leaks
+            # reload_dataloaders_every_n_epochs=1,  # Reload dataloaders to prevent  memory leaks
             detect_anomaly=False,  # Disable anomaly detection for better performance
+            benchmark=True,  # Enable cudnn benchmarking
+            deterministic=False,  # Disable deterministic training for better performance
         )
 
         print(f"\n{Colors.BOLD_GREEN}Starting training for {dataset_class.__name__} dataset {Colors.ROCKET}{Colors.ENDC}")
@@ -888,6 +944,7 @@ def test_sttre(dataset_class, data_path, model_params, train_params, checkpoint_
     test_trainer = L.Trainer(
         accelerator='gpu',
         devices=[0],
+        num_nodes=1,
         logger=wandb_logger,
         enable_progress_bar=True,
         strategy='auto'
@@ -915,22 +972,22 @@ if __name__ == "__main__":
     checkpoint_path = os.path.join(Config.MODEL_DIR, 'sttre-uber-epoch=519-val_loss=6.46.ckpt')
     
     model_params = {
-        'embed_size': 32,
-        'num_layers': 3,
-        'heads': 4,
-        'forward_expansion': 1,
+        'embed_size': 128,
+        'num_layers': 4,
+        'heads': 8,
+        'forward_expansion': 2,
         'output_size': 1
     }
 
     train_params = {
-        'batch_size': 256,
+        'batch_size': 64,
         'epochs': 1000,
         'lr': 0.0001,
         'dropout': 0.2,
         'patience': 20,
         'gradient_clip': 1.0,
-        'precision': 32,
-        'accumulate_grad_batches': 1,
+        'precision': '32-true', # 16-mixed enables mixed precision training, 32-true is full precision
+        'accumulate_grad_batches': 4,
         'test_split': 0.2,
         'val_split': 0.1
     }
