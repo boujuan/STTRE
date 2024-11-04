@@ -5,6 +5,8 @@
 # - Turn into pytorch lightning for easier parallelization ✅
 # - Add parallelization (DistributedDataParallel) ✅
 # - Use better logging (wandb/neptune/comet/clearml/mlflow) ✅
+# - Add learning rate scheduler ✅
+# - Add multiple nodes parallelization capabilities
 # - Try other datasets from original paper
 # - Add my dataset
 # - Integrate preprocessing codebase with model codebase with my dataset.
@@ -13,6 +15,12 @@
 # - Add dataloader for multiple datasets
 # - Reformat entire codebase into separate files (_init_.py, data.py, dataset.py, model.py, train.py, encoder.py, decoder.py, main.py...)
 # - Enable colorful/rich terminal output + Emojis
+
+# Current scheduler:
+# 1. Starts with a lower learning rate (lr/10)
+# 2. Warms up linearly to the peak learning rate over 10% of training
+# 3. Gradually decreases following a cosine curve
+# 4. Ends at a very small learning rate (lr/10000)
 
 import warnings
 import os
