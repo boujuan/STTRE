@@ -18,11 +18,11 @@ export NCCL_P2P_LEVEL=5  # Enable P2P between GPUs
 # Get SLURM variables
 MASTER_ADDR=$(scontrol show hostnames "$SLURM_JOB_NODELIST" | head -n 1)
 MASTER_PORT=29500
-NNODES=$SLURM_NNODES
-NODE_RANK=$SLURM_NODEID
-GPUS_PER_NODE=4
+NNODES=$SLURM_NNODES # Number of nodes
+NODE_RANK=$SLURM_NODEID # Node rank
+GPUS_PER_NODE=4 # Number of GPUs per node (default is 4)
 
-# Calculate world size
+# Calculate world size (total number of GPUs)
 WORLD_SIZE=$(($NNODES * $GPUS_PER_NODE))
 
 # Export variables for PyTorch Lightning
