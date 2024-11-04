@@ -1061,31 +1061,31 @@ if __name__ == "__main__":
     
     # INFO: MAIN MODEL PARAMETERS
     model_params = {
-        'embed_size': 128,
-        'num_layers': 4,
-        'heads': 8,
-        'forward_expansion': 2,
-        'output_size': 1
+        'embed_size': 128, # Determines dimension of the embedding space
+        'num_layers': 4, # Number of transformer blocks stacked
+        'heads': 8, # Number of parallel attention mechanisms
+        'forward_expansion': 2, # Multiplier for feedforward network size
+        'output_size': 1 # Number of output variables
     }
 
     # INFO: MAIN TRAINING PARAMETERS
     train_params = {
-        'batch_size': 64,
-        'epochs': 2000,
-        'lr': 0.0001,
-        'dropout': 0.2,
-        'patience': 50,
-        'gradient_clip': 1.0,
+        'batch_size': 64, # larger = more stable gradients
+        'epochs': 2000, # Maximum number of epochs to train
+        'lr': 0.0001, # Step size
+        'dropout': 0.2, # Regularization parameter (prevents overfitting)
+        'patience': 50, # Number of epochs to wait before early stopping
+        'gradient_clip': 1.0, # Prevents gradient explosion
         'precision': '32-true', # 16-mixed enables mixed precision training, 32-true is full precision
-        'accumulate_grad_batches': 4,
-        'test_split': 0.2,
-        'val_split': 0.1
+        'accumulate_grad_batches': 4, # Simulates a larger batch size
+        'test_split': 0.2, # Fraction of data to use for testing
+        'val_split': 0.1 # Fraction of data to use for validation
     }
 
     # INFO: DATASET CHOICE AND PATHS
     datasets = {
-        # 'AirQuality': (AirQuality, None),
-        'Uber': (Uber, os.path.join(Config.DATA_DIR, 'uber_stock.csv')),
+        'AirQuality': (AirQuality, None),
+        # 'Uber': (Uber, os.path.join(Config.DATA_DIR, 'uber_stock.csv')),
         # 'IstanbulStock': (IstanbulStock, os.path.join(Config.DATA_DIR, 'istanbul_stock.csv')),
         # 'Traffic': (Traffic, os.path.join(Config.DATA_DIR, 'traffic.csv')),
         # 'AppliancesEnergy1': (AppliancesEnergy1, os.path.join(Config.DATA_DIR, 'appliances_energy1.csv')),
