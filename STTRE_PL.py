@@ -6,8 +6,8 @@
 # - Add parallelization (DistributedDataParallel) ✅
 # - Use better logging (wandb/neptune/comet/clearml/mlflow) ✅
 # - Add learning rate scheduler ✅
+# - Check and reasure the number of heads necessary for the model. Per attention heads? ✅
 # - Add multiple nodes parallelization capabilities
-# - Try other datasets from original paper
 # - Add my dataset
 # - Integrate preprocessing codebase with model codebase with my dataset.
 # - Add automatic hyperparameter tuning (Population Based Training)
@@ -16,7 +16,7 @@
 # - Reformat entire codebase into separate files (_init_.py, data.py, dataset.py, model.py, train.py, encoder.py, decoder.py, main.py...)
 # - Enable colorful/rich terminal output + Emojis
 
-# Current scheduler:
+# Current learning rate scheduler: (not implemented yet)
 # 1. Starts with a lower learning rate (lr/10)
 # 2. Warms up linearly to the peak learning rate over 10% of training
 # 3. Gradually decreases following a cosine curve
@@ -247,7 +247,7 @@ class BaseDataset(Dataset):
 
 class Uber(BaseDataset):
     def __init__(self, dir, seq_len=60):
-        super().__init__(dir, seq_len, columns=[1, 2, 3, 4, 5])  # Adjust these indices based on your CSV structure
+        super().__init__(dir, seq_len, columns=[1, 2, 3, 4, 5])
 
 class IstanbulStock(BaseDataset):
     def __init__(self, dir, seq_len=40):
@@ -1069,32 +1069,32 @@ if __name__ == "__main__":
     
     # INFO: MAIN MODEL PARAMETERS
     model_params = {
-        'embed_size': 64, # Determines dimension of the embedding space
+        'embed_size': 32, # Determines dimension of the embedding space
         'num_layers': 3, # Number of transformer blocks stacked
-        'heads': 8, # Number of parallel attention mechanisms
+        'heads': 4, # Number of heads for spatio-temporal attention
         'forward_expansion': 4, # Multiplier for feedforward network size
         'output_size': 1 # Number of output variables
     }
 
     # INFO: MAIN TRAINING PARAMETERS
     train_params = {
-        'batch_size': 32, # larger = more stable gradients
+        'batch_size': 256, # larger = more stable gradients
         'epochs': 2000, # Maximum number of epochs to train
-        'lr': 0.001, # Step size
+        'lr': 0.0001, # Step size
         'dropout': 0.1, # Regularization parameter (prevents overfitting)
         'patience': 50, # Number of epochs to wait before early stopping
         'gradient_clip': 0.5, # Prevents gradient explosion
         'precision': '32-true', # 16-mixed enables mixed precision training, 32-true is full precision
         'accumulate_grad_batches': 2, # Simulates a larger batch size
-        'test_split': 0.2, # Fraction of data to use for testing
-        'val_split': 0.1 # Fraction of data to use for validation
+        'test_split': 0.5, # Fraction of data to use for testing
+        'val_split': 0.2 # Fraction of data to use for validation
     }
 
     # INFO: DATASET CHOICE AND PATHS
     datasets = {
-        'AirQuality': (AirQuality, None),
+        # 'AirQuality': (AirQuality, None),
         # 'Uber': (Uber, os.path.join(Config.DATA_DIR, 'uber_stock.csv')),
-        # 'IstanbulStock': (IstanbulStock, os.path.join(Config.DATA_DIR, 'istanbul_stock.csv')),
+        'IstanbulStock': (IstanbulStock, os.path.join(Config.DATA_DIR, 'istanbul_stock.csv')),
         # 'Traffic': (Traffic, os.path.join(Config.DATA_DIR, 'traffic.csv')),
         # 'AppliancesEnergy1': (AppliancesEnergy1, os.path.join(Config.DATA_DIR, 'appliances_energy1.csv')),
         # 'AppliancesEnergy2': (AppliancesEnergy2, os.path.join(Config.DATA_DIR, 'appliances_energy2.csv'))
