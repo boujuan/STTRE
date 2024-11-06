@@ -94,17 +94,15 @@ class Colors:
     
     @classmethod
     def disable_colors(cls):
-        """Disable colors if terminal doesn't support them"""
         for attr in dir(cls):
             if not attr.startswith('__') and isinstance(getattr(cls, attr), str):
                 setattr(cls, attr, '')
 
     @staticmethod
     def supports_color():
-        """Check if the terminal supports colors"""
+        """Check if term supports colors"""
         return hasattr(sys.stdout, 'isatty') and sys.stdout.isatty()
 
-# Initialize colors based on terminal support
 if not Colors.supports_color():
     Colors.disable_colors()
 
@@ -258,13 +256,11 @@ class AirQuality(BaseDataset):
         try:
             from ucimlrepo import fetch_ucirepo
             
-            # Fetch Beijing PM2.5 dataset
             beijing_pm2_5 = fetch_ucirepo(id=381)
             
             # Get features DataFrame and convert to polars
             features_df = pl.from_pandas(beijing_pm2_5.data.features)
             
-            # Convert wind direction to one-hot encoding
             # Get unique wind directions and create dummy columns
             wind_dummies = features_df.get_column('cbwd').unique()
             for direction in wind_dummies:
@@ -275,10 +271,10 @@ class AirQuality(BaseDataset):
                     .alias(f'wind_{direction}')
                 )
             
-            # Drop original categorical column
+            # Drop original column
             features_df = features_df.drop('cbwd')
             
-            # Convert to numpy arrays and handle missing values
+            # Convert to numpy arrays
             X = features_df.to_numpy().astype(np.float32)
             y = beijing_pm2_5.data.targets.to_numpy().astype(np.float32)
             
@@ -305,6 +301,7 @@ class AirQuality(BaseDataset):
         label = self.y[idx+self.seq_len+1]
         return torch.tensor(x, dtype=torch.float), torch.tensor(label, dtype=torch.float)
 
+    # Normalise data prem
     def normalize(self, X):
         X = np.transpose(X)
         X_norm = [(x - np.min(x)) / (np.max(x) - np.min(x)) for x in X]
@@ -322,6 +319,7 @@ class AppliancesEnergy2(BaseDataset):
     def __init__(self, dir, seq_len=144):
         super().__init__(dir, seq_len, columns=range(26))
 
+# INFO: Self-attention module for STTRE
 class SelfAttention(nn.Module):
     def __init__(self, embed_size, heads, seq_len, module, rel_emb, device):
         super(SelfAttention, self).__init__()
@@ -354,6 +352,7 @@ class SelfAttention(nn.Module):
 
         self.fc_out = nn.Linear(self.embed_size, self.embed_size)
 
+    # Forward pass for self-attention
     def forward(self, x):
         N, _, _ = x.shape
 
@@ -378,20 +377,21 @@ class SelfAttention(nn.Module):
             QE = self._mask_positions(QE)
             S = self._skew(QE).contiguous().view(N, self.heads, self.seq_len, self.seq_len)
             qk = torch.einsum("nqhd,nkhd->nhqk", [queries, keys])
-            # Create mask on the same device as input tensor
+            # Create mask on the same device as input tensor using triu (upper triangular matrix)
             mask = torch.triu(torch.ones(1, self.seq_len, self.seq_len, device=x.device), 1)
             if mask is not None:
                 qk = qk.masked_fill(mask == 0, float("-1e20"))
             attention = torch.softmax(qk / (self.embed_size ** (1/2)), dim=3) + S
         else:
             qk = torch.einsum("nqhd,nkhd->nhqk", [queries, keys])
-            # Create mask on the same device as input tensor
+            # Create mask on the same device as input tensor using triu (upper triangular matrix)
             mask = torch.triu(torch.ones(1, self.seq_len, self.seq_len, device=x.device), 1)
             if mask is not None:
                 qk = qk.masked_fill(mask == 0, float("-1e20"))
             attention = torch.softmax(qk / (self.embed_size ** (1/2)), dim=3)
 
         if self.module in ['spatial', 'temporal']:
+            # Reshape attention and values to match the expected output shape
             z = torch.einsum("nhql,nlhd->nqhd", [attention, values]).reshape(N, self.seq_len*self.heads, self.embed_size)
         else:
             z = torch.einsum("nhql,nlhd->nqhd", [attention, values]).reshape(N, self.seq_len, self.heads*self.head_dim)
@@ -399,23 +399,27 @@ class SelfAttention(nn.Module):
         z = self.fc_out(z)
         return z
 
+    # Mask positions in the attention matrix
     def _mask_positions(self, qe):
         L = qe.shape[-1]
         # Create mask on the same device as input tensor
         mask = torch.triu(torch.ones(L, L, device=qe.device), 1).flip(1)
         return qe.masked_fill((mask == 1), 0)
 
+    # Skew the attention matrix 
     def _skew(self, qe):
         padded_qe = F.pad(qe, [1,0])
         s = padded_qe.shape
         padded_qe = padded_qe.view(s[0], s[1], s[3], s[2])
         return padded_qe[:,:,1:,:]
 
+# INFO: Transformer block for STTRE
 class TransformerBlock(nn.Module):
     def __init__(self, embed_size, heads, seq_len, module, forward_expansion, rel_emb, device):
         super(TransformerBlock, self).__init__()
         self.attention = SelfAttention(embed_size, heads, seq_len, module, rel_emb=rel_emb, device=device)
 
+        # Batch normalisation for spatial and temporal modules
         if module in ['spatial', 'temporal']:
             self.norm1 = nn.BatchNorm1d(seq_len*heads)
             self.norm2 = nn.BatchNorm1d(seq_len*heads)
@@ -423,6 +427,7 @@ class TransformerBlock(nn.Module):
             self.norm1 = nn.BatchNorm1d(seq_len)
             self.norm2 = nn.BatchNorm1d(seq_len)
 
+        # Feed-forward layer
         self.feed_forward = nn.Sequential(
             nn.Linear(embed_size, forward_expansion * embed_size),
             nn.LeakyReLU(),
@@ -436,6 +441,7 @@ class TransformerBlock(nn.Module):
         out = self.norm2(forward + x)
         return out
 
+# INFO: Encoder for STTRE
 class Encoder(nn.Module):
     def __init__(self, seq_len, embed_size, num_layers, heads, device, forward_expansion, module, output_size=1, rel_emb=True):
         super(Encoder, self).__init__()
@@ -445,6 +451,7 @@ class Encoder(nn.Module):
         self.rel_emb = rel_emb
         self.fc_out = nn.Linear(embed_size, embed_size)
 
+        # List of transformer blocks
         self.layers = nn.ModuleList(
             [TransformerBlock(embed_size, heads, seq_len, module, forward_expansion=forward_expansion, rel_emb=rel_emb, device=device)
              for _ in range(num_layers)]
@@ -456,7 +463,7 @@ class Encoder(nn.Module):
         out = self.fc_out(out)
         return out
 
-# INFO: Main model class using PyTorch Lightning
+# INFO: Main model class for STTRE using PyTorch Lightning
 class LitSTTRE(L.LightningModule):
     def __init__(self, input_shape, output_size, model_params, train_params):
         super().__init__()
@@ -484,6 +491,7 @@ class LitSTTRE(L.LightningModule):
             rel_emb=True
         )
         
+        # Spatial encoder
         self.spatial = Encoder(
             seq_len=self.num_var,
             embed_size=model_params['embed_size'],
@@ -495,6 +503,7 @@ class LitSTTRE(L.LightningModule):
             rel_emb=True
         )
         
+        # Spatiotemporal encoder
         self.spatiotemporal = Encoder(
             seq_len=self.seq_len*self.num_var,
             embed_size=model_params['embed_size'],
@@ -511,7 +520,7 @@ class LitSTTRE(L.LightningModule):
         self.fc_out2 = nn.Linear(model_params['embed_size']//2, 1)
         self.out = nn.Linear((self.num_elements*3), output_size)
         
-        # Initialize metrics
+        # Initialize metrics for training
         metrics = ['mse', 'mae', 'mape']
         for split in ['train', 'val']:
             for metric in metrics:
@@ -571,6 +580,7 @@ class LitSTTRE(L.LightningModule):
         
         return out
 
+    # Training step for STTRE
     def training_step(self, batch, batch_idx):
         x, y = batch
         y_hat = self(x)
@@ -582,7 +592,7 @@ class LitSTTRE(L.LightningModule):
         self.train_mape(y_hat, y)
         self.metrics_updated = True
         
-        # Log metrics to wandb
+        # Log metrics to wandb logger
         self.log_dict({
             'train/loss': loss,
             'train/mse': self.train_mse,
@@ -592,6 +602,7 @@ class LitSTTRE(L.LightningModule):
         
         return loss
 
+    # Validation step for STTRE
     def validation_step(self, batch, batch_idx):
         x, y = batch
         y_hat = self(x)
@@ -631,8 +642,8 @@ class LitSTTRE(L.LightningModule):
         
         return test_loss
 
+    # Called at the end of each training epoch
     def on_train_epoch_end(self):
-        """Called at the end of each training epoch"""
         # Only compute and log metrics if they've been updated
         if not self.metrics_updated:
             return
@@ -665,8 +676,8 @@ class LitSTTRE(L.LightningModule):
         except Exception as e:
             print(f"Error in on_train_epoch_end: {str(e)}")
 
+    # Called at the start of each training epoch
     def on_train_epoch_start(self):
-        """Reset metrics at the start of each epoch"""
         self.train_mse.reset()
         self.train_mae.reset()
         self.train_mape.reset()
@@ -676,6 +687,7 @@ class LitSTTRE(L.LightningModule):
         self.metrics_updated = False
 
     def configure_optimizers(self):
+        # Choose Adam optimizer and learning rate scheduler for training
         optimizer = torch.optim.Adam(self.parameters(), lr=self.train_params['lr'])
         scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
             optimizer,
@@ -693,8 +705,8 @@ class LitSTTRE(L.LightningModule):
             }
         }
 
+    # Called when training starts
     def on_train_start(self):
-        """Called when training starts"""
         # Initialize metrics to zero
         self.train_mse.reset()
         self.train_mae.reset()
@@ -710,6 +722,7 @@ class LitSTTRE(L.LightningModule):
             'val': {'MSE': [], 'MAE': [], 'MAPE': []}
         }
 
+# INFO: Data module for STTRE using PyTorch Lightning
 class STTREDataModule(L.LightningDataModule):
     def __init__(self, dataset_class, data_path, batch_size, test_split=0.2, val_split=0.1):
         super().__init__()
@@ -719,8 +732,8 @@ class STTREDataModule(L.LightningDataModule):
         self.test_split = test_split
         self.val_split = val_split
         self.num_workers = min(32, os.cpu_count())  # Dynamically set workers
-        self.persistent_workers = True
-        self.pin_memory = True
+        self.persistent_workers = True # Keep workers alive between epochs
+        self.pin_memory = True # Use pinned memory for faster memory transfers
         
     def setup(self, stage=None):
         if not hasattr(self, 'train_dataset'):  # Only setup once
@@ -761,6 +774,7 @@ class STTREDataModule(L.LightningDataModule):
                 print(f"{Colors.RED}Error preparing data: {str(e)}{Colors.CROSS}{Colors.ENDC}")
                 raise
 
+    # Training dataloader
     def train_dataloader(self):
         return DataLoader(
             self.train_dataset,
@@ -773,6 +787,7 @@ class STTREDataModule(L.LightningDataModule):
             drop_last=True  # Drop incomplete batches
         )
 
+    # Validation dataloader
     def val_dataloader(self):
         return DataLoader(
             self.val_dataset,
@@ -782,6 +797,7 @@ class STTREDataModule(L.LightningDataModule):
             persistent_workers=self.persistent_workers
         )
 
+    # Test dataloader
     def test_dataloader(self):
         return DataLoader(
             self.test_dataset,
@@ -817,7 +833,7 @@ def cleanup_old_checkpoints(model_dir, dataset_name, keep_top_k=3):
         print(f"{Colors.RED}Error during checkpoint cleanup: {str(e)}{Colors.ENDC}")
 
 def save_if_below_threshold(trainer, pl_module):
-    # Only save if validation loss is below 50
+    # Only save if validation loss is below 50 (eg)
     current_loss = trainer.callback_metrics.get('val/loss')
     if current_loss is not None and current_loss < 50.0:
         return True
@@ -826,9 +842,9 @@ def save_if_below_threshold(trainer, pl_module):
 def train_sttre(dataset_class, data_path, model_params, train_params):
     """Train the STTRE model using the specified dataset."""
     try:
-        cleanup_memory()
+        cleanup_memory() # Clean up memory before training
         
-        Config.create_directories()
+        Config.create_directories() # Create directories for saving models and logs
         
         # Get local rank
         local_rank = int(os.environ.get("LOCAL_RANK", 0))
@@ -992,10 +1008,8 @@ def train_sttre(dataset_class, data_path, model_params, train_params):
         if local_rank == 0:
             wandb.finish()
 
+# INFO: Testing function for STTRE using a saved checkpoint
 def test_sttre(dataset_class, data_path, model_params, train_params, checkpoint_path):
-    """
-    Test the STTRE model using a saved checkpoint.
-    """
     Config.create_directories()
     
     # Initialize data module
@@ -1046,8 +1060,8 @@ def test_sttre(dataset_class, data_path, model_params, train_params, checkpoint_
 
     return model, test_results
 
+# Utility function to clean up memory
 def cleanup_memory():
-    """Utility function to clean up memory"""
     import gc
     gc.collect()
     torch.cuda.empty_cache()
@@ -1062,7 +1076,7 @@ if __name__ == "__main__":
     # Initialize wandb only on rank 0
     local_rank = int(os.environ.get("LOCAL_RANK", 0))
     if local_rank == 0:
-        wandb.login()
+        wandb.login() # Login to wandb website
     
     # Change to checkpoint path to test and validate
     checkpoint_path = os.path.join(Config.MODEL_DIR, 'sttre-uber-epoch=519-val_loss=6.46.ckpt')
