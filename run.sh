@@ -20,7 +20,7 @@ MASTER_ADDR=$(scontrol show hostnames "$SLURM_JOB_NODELIST" | head -n 1)
 MASTER_PORT=29500
 NNODES=$SLURM_NNODES # Number of nodes
 NODE_RANK=$SLURM_NODEID # Node rank
-GPUS_PER_NODE=4 # Number of GPUs per node (default is 4)
+GPUS_PER_NODE=2 # Number of GPUs per node (default is 4)
 
 # Calculate world size (total number of GPUs)
 WORLD_SIZE=$(($NNODES * $GPUS_PER_NODE))
